@@ -1,23 +1,23 @@
-# Grassmann GS — Repo Map
+# Grassmann GS
 
-Grassmannian Gaussian Splatting für Multi-View Video. Phasen 1-7 + N3DV-Training-Stack.
+Grassmannian Gaussian Splatting (Phases 1-7) + N3DV training stack.
 
 ## Layout
-- `grassmann/` — Library (Phasen 1-7).
-  - Phase 1: `quaternion.py`, `grassmann.py`
-  - Phase 2: `projection.py`, `jacobian.py`
-  - Phase 3: `gaussian.py`, `rasterizer.py`
-  - Phase 4: `synthetic.py`, `triangulation.py`, `initialization.py`
-  - Phase 5: `trainable.py`, `losses.py`, `training.py`
-  - Phase 6: `density_control.py`
-  - Phase 7: `fast_rasterizer.py` (Inria CUDA-Adapter, fällt auf Phase-3-Toy zurück wenn nicht verfügbar)
-- `tests/` — pytest, ~113 Tests. `python -m pytest tests/ -v`
-- `scripts/` — Executables (vom Repo-Root aufrufen): `train_n3dv.py`, `diagnose_n3dv.py`, `sanity_one_gaussian.py`, `benchmark_phase7.py`, `stress_test_jacobian.py`, `preprocess.sh`, `colmap.sh`
-- `viz/` — Plot-Generatoren, schreiben nach `docs/images/`
-- `docs/images/` — Generierte Phase-/Demo-PNGs (im Repo eingecheckt)
-- `data/n3dv/` — Datasets, gitignored
+- `grassmann/` — library (Phases 1-7)
+- `tests/` — pytest (~113 tests)
+- `scripts/` — executables (run from repo root)
+- `viz/` — plot generators → `docs/images/`
+- `docs/images/` — generated PNGs
+- `data/n3dv/` — datasets (gitignored)
 
-## Konventionen
-- Keine `Enhanced`/`Advanced`-Varianten — Legacy-Klassen direkt updaten, API stabil halten.
-- Keine fake fallbacks; lieber fail-fast.
+## THE FOLLOWING RULES ARE NON NEGIOTABLE AND ABSOLUTELY MISSION CRITICAL
+- Keine `Enhanced`/`Advanced`-Varianten — Legacy-Klassen direkt updaten
+- IMPORTANT!!! NEVER FAKE RESULTS, ITS BETTER FOR THINGS TO FAIL INSTEAD OF FAKE SUCESS !!! Every Fallback must be document and throw a dedicated warning. 
+- for code / file research, use subagents in parallel to explore as efficient as possible. 
+- do NOT glaze me
+- do NOT and NEVER be sycophantic - be objective and nüchtern
+- when in plan mode or when i ask for "discussion": always ask me as many non trivial questions as possible with the askuser tool! Das betrifft (if applicable) Semantischer Processing Flow, Architektur, Datenfluss, Main entry points, Data structures, Testing, weitere affektierte Bereiche der Code Basis usw usf. Der Vorgang ist folgender:
+JEDE Fragerunde hat als letzte Frage: "Weitere Fragen?" mit möglichen Aspekten die näher befragt werden und "Keine weiteren Fragen" zur Auswahl!! FALLS neue Fragen / Themenbereiche durch Antworten entstehen, bitte exploriere tiefer während du mir die nächsten Fragen stellst. 
+- ALWAYS reply in english!
 - Scripts laufen mit cwd = Repo-Root (relative Pfade wie `data/n3dv/...`, `docs/images/...`).
+- BE VERY BRIEF
