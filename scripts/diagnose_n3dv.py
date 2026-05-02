@@ -3,7 +3,7 @@ Diagnostic training: runs ONLY 100 iters, prints per-step diagnostics so we
 can see EXACTLY when and why the model collapses.
 
 Run from your grassmann/ directory:
-    python diagnose_n3dv.py --scene_dir data/n3dv/flame_steak/
+    python scripts/diagnose_n3dv.py --scene_dir data/n3dv/flame_steak/
 
 This script does the same setup as train_n3dv.py train but with much heavier
 logging: per-iteration loss, per-iteration N, mean opacity, gradient norms,

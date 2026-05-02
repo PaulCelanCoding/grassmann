@@ -188,7 +188,7 @@ def demo_temporal_fade():
         fontsize=11,
     )
     plt.tight_layout()
-    plt.savefig("/home/claude/grassmann/demo1_temporal_fade.png", dpi=110, bbox_inches="tight")
+    plt.savefig("docs/images/demo1_temporal_fade.png", dpi=110, bbox_inches="tight")
     plt.close()
     print("  Saved demo1_temporal_fade.png")
 
@@ -228,7 +228,7 @@ def demo_occlusion():
     axes[2].imshow(img_both); axes[2].set_title("Both: red occludes green"); axes[2].axis("off")
     fig.suptitle("Demo 2: Alpha-composited occlusion (front-to-back)", fontsize=11)
     plt.tight_layout()
-    plt.savefig("/home/claude/grassmann/demo2_occlusion.png", dpi=110, bbox_inches="tight")
+    plt.savefig("docs/images/demo2_occlusion.png", dpi=110, bbox_inches="tight")
     plt.close()
     print("  Saved demo2_occlusion.png")
 
@@ -275,7 +275,7 @@ def demo_motion():
         fontsize=11,
     )
     plt.tight_layout()
-    plt.savefig("/home/claude/grassmann/demo3_motion.png", dpi=110, bbox_inches="tight")
+    plt.savefig("docs/images/demo3_motion.png", dpi=110, bbox_inches="tight")
     plt.close()
     print("  Saved demo3_motion.png")
 
@@ -329,7 +329,7 @@ def demo_scene():
         fontsize=11,
     )
     plt.tight_layout()
-    plt.savefig("/home/claude/grassmann/demo4_scene.png", dpi=110, bbox_inches="tight")
+    plt.savefig("docs/images/demo4_scene.png", dpi=110, bbox_inches="tight")
     plt.close()
     print("  Saved demo4_scene.png")
 

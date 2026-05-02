@@ -144,7 +144,7 @@ def visualize_jacobian():
              bbox=dict(boxstyle="round,pad=0.3", facecolor="wheat", alpha=0.7))
 
     plt.tight_layout()
-    plt.savefig("/home/claude/grassmann/jacobian_viz.png", dpi=110)
+    plt.savefig("docs/images/jacobian_viz.png", dpi=110)
     plt.close()
     print("Saved visualization to jacobian_viz.png")
 

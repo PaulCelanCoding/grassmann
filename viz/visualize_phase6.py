@@ -144,7 +144,7 @@ def demo_density_control():
 
     fig.suptitle("Phase 6: Density control grows the model as needed", fontsize=11)
     plt.tight_layout()
-    plt.savefig("/home/claude/grassmann/phase6_curves.png", dpi=110, bbox_inches="tight")
+    plt.savefig("docs/images/phase6_curves.png", dpi=110, bbox_inches="tight")
     plt.close()
     print("  Saved phase6_curves.png")
 
@@ -167,7 +167,7 @@ def demo_density_control():
         axes[2, k].axis("off")
     fig.suptitle(f"Phase 6 final renders @ t={t_mid}", fontsize=11, y=1.02)
     plt.tight_layout()
-    plt.savefig("/home/claude/grassmann/phase6_grid.png", dpi=110, bbox_inches="tight")
+    plt.savefig("docs/images/phase6_grid.png", dpi=110, bbox_inches="tight")
     plt.close()
     print("  Saved phase6_grid.png")
 

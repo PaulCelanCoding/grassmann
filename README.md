@@ -162,7 +162,7 @@ eigenvalue of world-space Σ" for our plane-based parameterization.
 - `Trainer` has `use_fast_rasterizer=True` config option. On a GPU machine
   it routes every render through the CUDA kernel; on CPU (or without the
   package) it silently uses the toy path. Same API either way.
-- `benchmark_phase7.py` — script to run on your GPU machine to verify the
+- `scripts/benchmark_phase7.py` — script to run on your GPU machine to verify the
   CUDA path and measure speedup. Typical speedup is 100–500× over the toy
   rasterizer for thousands of Gaussians at 480×640.
 
@@ -198,7 +198,7 @@ grassmann/
 │   ├── training.py              # Phase 5: Trainer class
 │   ├── density_control.py       # Phase 6: DensityTracker (prune/clone/split)
 │   └── fast_rasterizer.py       # Phase 7: diff-gaussian-rasterization adapter
-├── tests/
+├── tests/                       # pytest suite (~113 tests)
 │   ├── test_quaternion.py       # 11 tests
 │   ├── test_grassmann.py        # 16 tests
 │   ├── test_jacobian.py         # 14 tests
@@ -207,14 +207,25 @@ grassmann/
 │   ├── test_training.py         # 11 tests
 │   ├── test_density_control.py  # 12 tests
 │   └── test_fast_rasterizer.py  # 10 tests
-├── visualize_jacobian.py        # generates jacobian_viz.png
-├── visualize_rendering.py       # generates demo1..demo4 PNGs (Phase 3)
-├── visualize_phase4.py          # generates phase4_*.png
-├── visualize_phase5.py          # generates phase5_*.png (training curves)
-├── visualize_phase6.py          # generates phase6_*.png (density control)
-├── visualize_phase7.py          # generates phase7_architecture.png
-├── benchmark_phase7.py          # GPU benchmark: toy vs CUDA rasterizer
-├── stress_test_jacobian.py      # fuzzing harness
+├── scripts/                     # executables (run from repo root)
+│   ├── train_n3dv.py            # N3DV training driver (prepare + train)
+│   ├── diagnose_n3dv.py         # heavy-logging single-frame debug runner
+│   ├── sanity_one_gaussian.py   # one-Gaussian smoke test on N3DV
+│   ├── benchmark_phase7.py      # GPU benchmark: toy vs CUDA rasterizer
+│   ├── stress_test_jacobian.py  # Jacobian fuzzer vs autograd
+│   ├── preprocess.sh            # ffmpeg → frames for N3DV scenes
+│   └── colmap.sh                # COLMAP → points3D.txt
+├── viz/                         # plot generators (write to docs/images/)
+│   ├── visualize_jacobian.py    # → docs/images/jacobian_viz.png
+│   ├── visualize_rendering.py   # → docs/images/demo1..demo4*.png (Phase 3)
+│   ├── visualize_phase4.py      # → docs/images/phase4_*.png
+│   ├── visualize_phase5.py      # → docs/images/phase5_*.png (training curves)
+│   ├── visualize_phase6.py      # → docs/images/phase6_*.png (density control)
+│   └── visualize_phase7.py      # → docs/images/phase7_architecture.png
+├── docs/images/                 # generated plots and demo PNGs
+├── data/n3dv/                   # datasets (gitignored, populate locally)
+├── requirements.txt
+├── CLAUDE.md
 └── README.md                    # this file
 ```
 
@@ -227,32 +238,32 @@ Install dependencies (PyTorch, matplotlib, pytest, numpy). Then:
 python -m pytest tests/ -v
 
 # Generate the Phase 2 visualization.
-python visualize_jacobian.py
+python viz/visualize_jacobian.py
 
 # Generate the Phase 3 demo animations (four PNGs).
-python visualize_rendering.py
+python viz/visualize_rendering.py
 
 # Generate the Phase 4 pipeline visualizations (three PNGs).
-python visualize_phase4.py
+python viz/visualize_phase4.py
 
 # Generate the Phase 5 training demos (four PNGs) -- takes ~2 minutes.
-python visualize_phase5.py
+python viz/visualize_phase5.py
 
 # Generate the Phase 6 density-control demo (two PNGs) -- takes ~4 minutes.
-python visualize_phase6.py
+python viz/visualize_phase6.py
 
 # Generate the Phase 7 architecture diagram (instant).
-python visualize_phase7.py
+python viz/visualize_phase7.py
 
 # Optional: fuzz-test the Jacobian against autograd on many random configs.
-python stress_test_jacobian.py
+python scripts/stress_test_jacobian.py
 ```
 
 On a GPU machine with `diff-gaussian-rasterization` installed, also run the
 Phase 7 benchmark to verify the CUDA path works and measure speedup:
 
 ```bash
-python benchmark_phase7.py
+python scripts/benchmark_phase7.py
 ```
 
 ## What each demo shows

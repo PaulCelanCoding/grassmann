@@ -118,7 +118,7 @@ def viz_pipeline_single_time():
         fontsize=12, y=1.02,
     )
     plt.tight_layout()
-    plt.savefig("/home/claude/grassmann/phase4_pipeline.png", dpi=110, bbox_inches="tight")
+    plt.savefig("docs/images/phase4_pipeline.png", dpi=110, bbox_inches="tight")
     plt.close()
     print("  Saved phase4_pipeline.png")
 
@@ -169,7 +169,7 @@ def viz_triangulation_accuracy():
         fontsize=12,
     )
     plt.tight_layout()
-    plt.savefig("/home/claude/grassmann/phase4_triangulation.png", dpi=110, bbox_inches="tight")
+    plt.savefig("docs/images/phase4_triangulation.png", dpi=110, bbox_inches="tight")
     plt.close()
     print("  Saved phase4_triangulation.png")
 
@@ -210,7 +210,7 @@ def viz_timelapse():
         fontsize=11,
     )
     plt.tight_layout()
-    plt.savefig("/home/claude/grassmann/phase4_timelapse.png", dpi=110, bbox_inches="tight")
+    plt.savefig("docs/images/phase4_timelapse.png", dpi=110, bbox_inches="tight")
     plt.close()
     print("  Saved phase4_timelapse.png")
 

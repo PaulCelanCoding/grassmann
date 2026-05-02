@@ -95,7 +95,7 @@ def draw_phase7_diagram():
             bbox=dict(boxstyle="round,pad=0.3", facecolor="white",
                       edgecolor=color, alpha=0.8))
 
-    plt.savefig("/home/claude/grassmann/phase7_architecture.png",
+    plt.savefig("docs/images/phase7_architecture.png",
                 dpi=110, bbox_inches="tight")
     plt.close()
     print("Saved phase7_architecture.png")

@@ -120,7 +120,7 @@ def demo_overfit():
     fig.suptitle("Demo A: Overfit single frame. Initial colors were wrong gray; training recovers them.",
                  fontsize=11, y=1.02)
     plt.tight_layout()
-    plt.savefig("/home/claude/grassmann/phase5_overfit.png", dpi=110, bbox_inches="tight")
+    plt.savefig("docs/images/phase5_overfit.png", dpi=110, bbox_inches="tight")
     plt.close()
 
     # Final target vs rendered side-by-side.
@@ -132,7 +132,7 @@ def demo_overfit():
     axes[1].set_title("Trained (1000 iters)")
     axes[1].axis("off")
     plt.tight_layout()
-    plt.savefig("/home/claude/grassmann/phase5_overfit_final.png", dpi=110, bbox_inches="tight")
+    plt.savefig("docs/images/phase5_overfit_final.png", dpi=110, bbox_inches="tight")
     plt.close()
 
     print(f"  Final loss: {losses[-1]:.4f}")
@@ -216,7 +216,7 @@ def demo_multiview_multiframe():
     ax_rec.imshow(rec); ax_rec.set_title("Trained"); ax_rec.axis("off")
     fig.suptitle("Demo B: 3 cams × 5 frames training", fontsize=11)
     plt.tight_layout()
-    plt.savefig("/home/claude/grassmann/phase5_multiview.png", dpi=110, bbox_inches="tight")
+    plt.savefig("docs/images/phase5_multiview.png", dpi=110, bbox_inches="tight")
     plt.close()
 
     # Final full grid: GT top, trained bottom, for all K cameras at the middle time.
@@ -234,7 +234,7 @@ def demo_multiview_multiframe():
         axes[1, k].axis("off")
     fig.suptitle(f"Demo B final: all cameras @ t={t_mid}", fontsize=11, y=1.02)
     plt.tight_layout()
-    plt.savefig("/home/claude/grassmann/phase5_multiview_grid.png", dpi=110, bbox_inches="tight")
+    plt.savefig("docs/images/phase5_multiview_grid.png", dpi=110, bbox_inches="tight")
     plt.close()
     print(f"  Final loss: {trainer.history['loss'][-1]:.4f}")
     print("  Saved phase5_multiview.png, phase5_multiview_grid.png")

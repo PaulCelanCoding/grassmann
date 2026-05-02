@@ -16,7 +16,7 @@ Outputs PNGs `sanity_camNN.png` for each camera. Open them and check:
         epipolar line in a predictable way.)
 
 Run from your grassmann/ directory:
-    python sanity_one_gaussian.py --scene_dir data/n3dv/flame_steak/
+    python scripts/sanity_one_gaussian.py --scene_dir data/n3dv/flame_steak/
 """
 import argparse
 from pathlib import Path

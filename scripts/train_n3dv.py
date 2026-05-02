@@ -23,10 +23,10 @@ the format below. See the helper at the bottom of this script.
 USAGE:
 
     # Step 1: convert calibration (one-time per scene)
-    python train_n3dv.py prepare --scene_dir n3dv/flame_steak
+    python scripts/train_n3dv.py prepare --scene_dir n3dv/flame_steak
 
     # Step 2: train
-    python train_n3dv.py train \
+    python scripts/train_n3dv.py train \
         --scene_dir n3dv/flame_steak \
         --num_iters 30000 \
         --use_fast_rasterizer
