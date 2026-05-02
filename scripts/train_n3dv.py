@@ -288,7 +288,9 @@ def train(args):
     trainer.train()
 
     # Save the trained model.
-    out_path = scene_dir / "trained_model.pt"
+    out_dir = Path(args.output_dir) if args.output_dir else scene_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / "trained_model.pt"
     torch.save({
         "model_state_dict": model.state_dict(),
         "history": trainer.history,
@@ -390,6 +392,8 @@ def main():
     p_train.add_argument("--max_initial_points", type=int, default=100_000)
     p_train.add_argument("--use_fast_rasterizer", action="store_true",
                          help="Use diff-gaussian-rasterization (CUDA only).")
+    p_train.add_argument("--output_dir", default=None,
+                         help="Where to save trained_model.pt. Default: scene_dir.")
     p_train.set_defaults(func=train)
 
     args = p.parse_args()

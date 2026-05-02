@@ -10,6 +10,9 @@ Grassmannian Gaussian Splatting (Phases 1-7) + N3DV training stack.
 - `docs/images/` — generated PNGs
 - `data/n3dv/` — datasets (gitignored)
 
+## GPU training (Modal, L4)
+`modal run scripts/train_modal.py --cmd smoke` (or `train|diagnose|sanity`); preload data once via `modal volume put gs-n3dv ./data/n3dv/<scene> /<scene>`.
+
 ## THE FOLLOWING RULES ARE NON NEGIOTABLE AND ABSOLUTELY MISSION CRITICAL
 - Keine `Enhanced`/`Advanced`-Varianten — Legacy-Klassen direkt updaten
 - NEVER FAKE RESULTS, ITS BETTER FOR THINGS TO FAIL FAST INSTEAD OF FAKE SUCESS !!! Every Fallback must be documented and throw a dedicated warning. 
