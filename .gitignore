@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual envs
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Datasets / heavy artifacts
+data/n3dv/*/
+!data/n3dv/.gitkeep
+*.mp4
+*.mov
+*.npy
+*.npz
+*.pt
+*.pth
+*.ckpt
+*.ply
+checkpoints/
+runs/
+logs/
+wandb/
+
+# Local outputs
+*.log
+output/
+outputs/
