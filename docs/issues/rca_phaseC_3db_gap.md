@@ -222,10 +222,15 @@ After §8 the lever ranking changed; updated in priority order:
    2.27× N). Keeping `max_split_per_event=500` is correct. (*Caveat*:
    the untested SH3 × larger-N interaction may differ; not measured.)
 5. **Investigate the remaining 1.37 dB residual.** §8 confirms iter
-   budget + LR schedule are largely settled — the remaining gap likely
-   needs structural work (3-plane projector vs explicit
-   `(scales, rotations)`, densification thresholds, opacity-reset
-   cadence). See §8's "What's still unaccounted for" list.
+   budget + LR schedule are largely settled — the remaining gap needs
+   structural work. §9 narrows the candidates: the FFT signature
+   (−2.29 dB more HF loss vs D3DGS) is real and uniform-spatial, but the
+   §9d prune-control showed the original "sub-floor Gaussians cannot be
+   represented" attribution does not hold. Top remaining structural
+   probes: ray-splat-intersection rendering (2DGS-style; removes ε I
+   need), explicit `(scales, rotations)` parameterization, or D3DGS-style
+   densification regime as a bundle. See §9's "Implication for the next
+   probe" block.
 6. *(Defer)* Motion-model upgrade. Bound at ≤ 0.5 dB on slice-banana
    scale 8.
 
@@ -424,52 +429,96 @@ floor at √ε ≈ 0.17 px. **Over half of D3DGS's Gaussians are thinner than
 the smallest Gaussian our parameterization can produce.** Plot:
 `docs/issues/rca_residual_size_dist.png`
 
-### Synthesis: rank-2 + ε I sets a representation floor
+### Synthesis (revised after §9d counter-check)
 
-The three analyses converge on a single mechanism:
+§9a + §9b remain valid signatures (output-space, deterministic):
+- Deficit is uniform across edges/flat (§9a, 1.11× / 1.17×)
+- Ours loses 2.29 dB more HF power than D3DGS (§9b)
 
-1. Our 3-plane projector parameterization makes Σ_3D(t_0) **rank-2 by
-   construction** (a disk in 3D, no extent along n̂).
-2. The CUDA EWA needs an invertible 3×3, so we lift with `ε I` where
-   ε = `sigma_3d_blur` = 1e-4. This is a **hard floor** on the smallest
-   axis: σ_min ≥ √ε ≈ 0.01 in scene units.
-3. D3DGS's `(scales, rotations)` parameterization has **no floor**: 88.8 %
-   of its Gaussians are thinner than our floor allows ours to be.
-4. Larger smallest axis → broader spatial kernel → low-pass filtering
-   (§9b shows −2.29 dB extra HF loss).
-5. Low-pass filtering is **content-independent and spatially uniform**,
-   matching §9a (1.11×/1.17× edge/flat ratios — basically equal).
+§9c's "floor → 88.8 % sub-floor" stat **is real but does not by itself
+prove the floor is the binding constraint** — the §9d counter-check
+below shows that pruning D3DGS's sub-floor Gaussians specifically is no
+more harmful than pruning a random subset of the same count. The 88.8 %
+stat described a representational *difference*; §9d rules out the
+specific attribution argument that "ours cannot represent what D3DGS
+uses sub-floor Gaussians for". The floor itself might still matter —
+§9d just doesn't prove it.
 
-This explains why §7's `sigma_3d_blur` ±10× sweep was symmetric and gave
-−0.29 dB both ways: ε is bounded below by numerical stability, and any
-ε > the natural Gaussian-thickness floor degrades quality without further
-helping invertibility.
+The FFT high-frequency loss (§9b: −2.29 dB) is still real and still
+demands a mechanism. After §9d, candidate mechanisms are:
 
-### Implication for the next probe
+- **Floor-as-low-pass** (still on the table). Larger average Gaussian
+  size = stronger spatial low-pass = HF roll-off. The 1.84× median
+  pixel-axis ratio (§9c) still implies stronger low-pass. §9d doesn't
+  rule this out; it only invalidates the "thin-Gaussians-are-essential"
+  argument for it.
+- **Densification-effectiveness gap** (new candidate after §9d).
+  D3DGS has ~5× more Gaussians and §9d shows pruning to ours' count
+  drops PSNR catastrophically *regardless of subset*. Ours' N3x test
+  (§6) showed scaling our count to 86k buys +0.02 dB. So the constraint
+  may be that **ours' densification cannot effectively grow the
+  population the way D3DGS's does** — independent of any per-Gaussian
+  representation difference.
 
-The remaining 1.37 dB sits in the rank-2 representation itself, not in
-hyperparameters around it. Three architectural directions:
+These two candidates are not mutually exclusive.
 
-1. **Switch to explicit `(scales, rotations)`** (the change called out in
-   the takeover prompt). Re-parameterize `TrainableGaussians` to learn
-   per-Gaussian (scale_0, scale_1, scale_2, quaternion) instead of L_raw,
-   bypass the projector, feed directly to `diff-gaussian-rasterization`.
-   Loses the 3-plane G(3,4) story but tests whether the parameterization
-   is the residual lever. **This is the structurally informative probe.**
-2. **Reduce `spatial_split_threshold`** by 10-100×. Currently 0.05 in
-   our raw scene units² (= 0.22 std-dev in scene units, i.e. our largest-
-   axis median is at 0.27 — so the cap is binding). The user has run a
-   `grad-thr` sweep that was null/negative (memory:
-   `project_grassmann_phaseC_residual_14k`), but `spatial_split_threshold`
-   specifically may not have been swept. **Cheap CLI test (~$0.07).**
-3. **Match D3DGS scene normalization.** Auto-rescale cameras + points to
-   a unit cube before training, so our threshold and ε I have the same
-   *relative* scale they have in D3DGS. Minor code change. Won't fix the
-   rank-2 floor but should reduce the size mismatch.
+### §9d. Counter-check: pruned-D3DGS PSNR (floor vs random subsets)
 
-Probe #2 is the cheapest test before committing to (1). If it moves
-PSNR by >0.3 dB, the issue was hyperparameter scale; if not, the rank-2
-floor is the binding constraint and (1) is required.
+Pruned D3DGS's iso14k PLY two ways to the same final count (20 925
+Gaussians, 11.2 % of original 186 340) and re-rendered:
+
+| variant | how pruned | PSNR | Δ vs full D3DGS (27.50) |
+|---|---|---|---|
+| floor-pruned | keep top 11.2 % by smallest-axis (≥ √ε / SCALE in native coords) | **13.91 dB** | −13.59 dB |
+| random-pruned | random 11.2 % subset (seed 42) | **14.05 dB** | −13.45 dB |
+| **delta** | floor vs random | **0.14 dB** | — |
+
+Floor-pruning is essentially equivalent to random pruning of the same
+size. **The sub-floor Gaussians are not individually load-bearing** —
+they're just ~89 % of the population, and removing any 89 % subset is
+~13 dB worse. This invalidates the §9c attribution claim that "ours
+cannot represent what D3DGS uses sub-floor Gaussians for". It does *not*
+prove the rank-2 + ε I floor is irrelevant — that's a separate question
+(see Synthesis above).
+
+*Test-design caveat:* both prunings destroy coverage to ~11 % of the
+original population, so each individual Gaussian's contribution gets
+swamped by the catastrophic count-loss. A more selective test —
+pruning *only* the largest Gaussians vs *only* the smallest — would
+better isolate "thin matters" from "many matters". Not run.
+
+Reproduction: `/tmp/d3dgs_pc/iteration_14000/point_cloud_{pruned,random}.ply`,
+Modal volume `gs-checkpoints/deformable-slice-banana-14000it-iso14k-{pruned,random}/`.
+
+### Implication for the next probe (revised)
+
+The 1.37 dB residual is now best framed as **either** a
+densification-effectiveness gap **or** a representation effect (or
+both); §9d rules out one specific argument for the floor but doesn't
+settle which mechanism dominates:
+- D3DGS uses 5× more Gaussians and uses them roughly uniformly (§9d
+  random-prune ≈ floor-prune).
+- Ours can't profit from raising N (§6's N3x test).
+- The FFT 2.29 dB HF loss could come from larger average kernel size
+  (representation) **or** from the smaller useful population
+  (densification).
+
+Two architectural directions:
+
+1. **Adopt 3DGS's full densification regime** (clone-when-small-and-stressed
+   vs split-when-large-and-stressed; periodic opacity reset; same
+   thresholds in ours' coord frame). Cheaper than (2). User's memory
+   (`project_grassmann_phaseC_residual_14k`) records that single-flag
+   sweeps of `grad-thr`, `opacity-reset`, `densify-every` etc. were null,
+   so this probably needs a **bundled** test, not single-flag.
+2. **Switch to ray-splat-intersection rendering** (2DGS-style): removes
+   the EWA's ε I requirement and gives sharper per-Gaussian kernels.
+   Might increase the "useful representational power per Gaussian" enough
+   that fewer Gaussians match D3DGS quality. Substantive code (~1 week).
+3. **Switch to explicit `(scales, rotations)`** — same diff-gaussian-
+   rasterizer, but Gaussians are now full-rank ellipsoids. Gradient flow
+   through scale + quaternion may differ enough from L_raw to change
+   densification dynamics. ~1 day.
 
 Files:
 - `docs/issues/rca_residual_fft.png` — radial power spectrum
