@@ -2,6 +2,8 @@
 
 Grassmannian Gaussian Splatting (Phases 1-7) + N3DV training stack.
 
+We are implementing docs/maths/. This works with monocular video data.
+
 ## Layout
 - `grassmann/` — library (Phases 1-7)
 - `tests/` — pytest (~113 tests)
