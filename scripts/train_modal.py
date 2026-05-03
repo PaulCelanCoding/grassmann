@@ -122,6 +122,12 @@ def train(
     seed: int | None,
     static_baseline: bool,
     val_stride: int,
+    split_convention: str,
+    init_points_multiplier: int,
+    diag_single_frame: int,
+    lambda_frob: float,
+    opacity_reset_every: int,
+    lambda_aniso: float,
 ) -> None:
     scene_dir = _ensure_scene_unpacked(scene)
     suffix = f"-{run_tag}" if run_tag else ""
@@ -148,7 +154,17 @@ def train(
         argv += ["--seed", str(seed)]
     if static_baseline:
         argv.append("--static_baseline")
-    argv += ["--val_stride", str(val_stride)]
+    argv += ["--val_stride", str(val_stride),
+             "--split_convention", split_convention,
+             "--init_points_multiplier", str(init_points_multiplier)]
+    if diag_single_frame >= 0:
+        argv += ["--diag_single_frame", str(diag_single_frame)]
+    if lambda_frob > 0.0:
+        argv += ["--lambda_frob", str(lambda_frob)]
+    if opacity_reset_every > 0:
+        argv += ["--opacity_reset_every", str(opacity_reset_every)]
+    if lambda_aniso > 0.0:
+        argv += ["--lambda_aniso", str(lambda_aniso)]
     _run(argv)
     ckpt_vol.commit()
 
@@ -214,6 +230,12 @@ def main(
     seed: int = -1,
     static_baseline: bool = False,
     val_stride: int = 4,
+    split_convention: str = "val_stride",
+    init_points_multiplier: int = 1,
+    diag_single_frame: int = -1,
+    lambda_frob: float = 0.0,
+    opacity_reset_every: int = 0,
+    lambda_aniso: float = 0.0,
 ):
     """
     --cmd smoke:  short run (--iters used; default 500) at scale 4. Validates
@@ -236,6 +258,12 @@ def main(
             seed=seed_arg,
             static_baseline=static_baseline,
             val_stride=val_stride,
+            split_convention=split_convention,
+            init_points_multiplier=init_points_multiplier,
+            diag_single_frame=diag_single_frame,
+            lambda_frob=lambda_frob,
+            opacity_reset_every=opacity_reset_every,
+            lambda_aniso=lambda_aniso,
         )
     elif cmd == "train":
         train.remote(
@@ -251,6 +279,12 @@ def main(
             seed=seed_arg,
             static_baseline=static_baseline,
             val_stride=val_stride,
+            split_convention=split_convention,
+            init_points_multiplier=init_points_multiplier,
+            diag_single_frame=diag_single_frame,
+            lambda_frob=lambda_frob,
+            opacity_reset_every=opacity_reset_every,
+            lambda_aniso=lambda_aniso,
         )
     elif cmd == "render":
         if not ckpt:

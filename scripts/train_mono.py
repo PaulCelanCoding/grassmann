@@ -108,6 +108,39 @@ def main():
                          "ships with val_ids=[]), construct a held-out split by taking every "
                          "Nth frame. DyGauBench convention for HyperNeRF interp = 4 (248 train "
                          "/ 82 val for 330-frame slice-banana). 0 disables val-split injection.")
+    ap.add_argument("--split_convention", choices=("val_stride", "deformable_interp"),
+                    default="val_stride",
+                    help="How to construct train/test split when dataset ships val_ids=[]. "
+                         "'val_stride' = every val_stride-th frame is val, rest is train "
+                         "(247/83 for stride 4). 'deformable_interp' = ids[::4] is train, "
+                         "ids[2::4] is val (83/82 -- matches Deformable3DGS HyperNeRF interp "
+                         "convention; needed for iso-iter comparisons against published numbers).")
+    ap.add_argument("--init_points_multiplier", type=int, default=1,
+                    help="Replicate the init point cloud K times with small random "
+                         "perturbations (~0.01 in scene units) before constructing Gaussians. "
+                         "Used by the capacity-vs-motion diagnostic: if doubling/quadrupling N "
+                         "lifts the PSNR ceiling, the limiter is capacity, not the motion "
+                         "model. K=1 (default) is the original cloud.")
+    ap.add_argument("--diag_single_frame", type=int, default=-1,
+                    help="Capacity-vs-motion diagnostic 2: train and validate on a single "
+                         "frame index (no time variation). Implies --static_baseline. "
+                         "Final val PSNR = the ceiling for static 3DGS on this image at "
+                         "current scale + N. If our full temporal run on the same frame "
+                         "is much lower, the gap = motion residuals. -1 disables.")
+    ap.add_argument("--lambda_frob", type=float, default=0.0,
+                    help="Frobenius-norm penalty on L_raw (Phase-A-correctness). "
+                         "Recommended ≈1e-4. Targets the 7%% rank-1-collapse pathology where "
+                         "the optimizer routes capacity into n̂ (projector null-direction).")
+    ap.add_argument("--opacity_reset_every", type=int, default=0,
+                    help="Periodic opacity-logit reset (Phase-A-correctness). Every N "
+                         "iters, opacity_logit -> opacity_reset_logit; Adam state for "
+                         "opacity_logit is also zeroed. 0 disables. Standard 3DGS uses "
+                         "3000. Targets the 32%%-dead pathology.")
+    ap.add_argument("--opacity_reset_logit", type=float, default=-5.0,
+                    help="Target opacity_logit at reset. -5 -> sigmoid(-5)≈0.007.")
+    ap.add_argument("--lambda_aniso", type=float, default=0.0,
+                    help="Bounded anisotropy penalty on Σ_3D(t_0). Trims the runaway "
+                         "λ_max/λ_min tail. 0 disables. Recommended ≈1e-3 (small).")
     args = ap.parse_args()
 
     if args.densify_every != 0:
@@ -126,20 +159,41 @@ def main():
           f"train={len(ds.train_indices)}, val={len(ds.val_indices)}")
 
     # If the dataset ships with no val split (HyperNeRF interp ships with
-    # val_ids=[]), construct one by holding out every val_stride-th frame.
-    # DyGauBench convention for HyperNeRF interp = stride 4.
+    # val_ids=[]), construct one. Two conventions supported:
+    #   * val_stride: every val_stride-th frame is val (rest is train).
+    #     DyGauBench convention for HyperNeRF interp -> stride 4 (247/83).
+    #   * deformable_interp: train = ids[::4], val = ids[2::4]. Matches
+    #     Deformable3DGS scene/dataset_readers.py (interp branch). 83/82 for
+    #     330-frame slice-banana. Use this for iso-iter comparison vs.
+    #     Deformable3DGS / published interp numbers.
     val_indices_override = None
-    if args.val_stride > 0 and len(ds.val_indices) == 0:
-        held_out = list(range(0, ds.T, args.val_stride))
-        val_indices_override = held_out
-        train_idx_after = [i for i in range(ds.T) if i not in set(held_out)]
-        print(f"  [val_stride={args.val_stride}] dataset ships no val split; constructing "
-              f"held-out: train={len(train_idx_after)}, val={len(held_out)}")
+    train_indices_override = None
+    if args.diag_single_frame >= 0:
+        k = args.diag_single_frame
+        if not (0 <= k < ds.T):
+            raise SystemExit(f"--diag_single_frame {k} out of range [0, {ds.T})")
+        train_indices_override = [k]
+        val_indices_override = [k]
+        args.static_baseline = True
+        print(f"  [diag_single_frame={k}] training and validating on a single frame; "
+              f"static_baseline forced ON (single-frame fit, no time variation).")
+    elif args.val_stride > 0 and len(ds.val_indices) == 0:
+        if args.split_convention == "deformable_interp":
+            train_indices_override = list(range(0, ds.T, 4))            # ids[::4]
+            val_indices_override = list(range(2, ds.T, 4))              # ids[2::4]
+            print(f"  [split=deformable_interp] train={len(train_indices_override)}, "
+                  f"val={len(val_indices_override)} (Deformable3DGS HyperNeRF interp split)")
+        else:
+            held_out = list(range(0, ds.T, args.val_stride))
+            val_indices_override = held_out
+            train_indices_override = [i for i in range(ds.T) if i not in set(held_out)]
+            print(f"  [val_stride={args.val_stride}] dataset ships no val split; "
+                  f"constructing held-out: train={len(train_indices_override)}, "
+                  f"val={len(held_out)}")
 
     # Initialize one Gaussian per scene point. Pick a temporal mean per point
     # from the median-observed frame's normalized time (sensible for static
     # background; dynamic objects will be re-organized by training).
-    print(f"  Initializing {ds.N_points} Gaussians (strategy={args.init_strategy})...")
     times_for_init = []
     for obs in ds.observability:
         if obs:
@@ -149,12 +203,34 @@ def main():
         times_for_init.append(float(ds.times[t_idx]))
     times_init = torch.tensor(times_for_init, dtype=torch.float64)
 
+    # Capacity diagnostic: replicate the point cloud K times with small noise.
+    points = ds.points3D
+    times_used = times_init
+    obs_used = ds.observability
+    if args.init_points_multiplier > 1:
+        K = args.init_points_multiplier
+        rng = torch.Generator(); rng.manual_seed(args.seed if args.seed is not None else 0)
+        repeated_points = points.repeat(K, 1)
+        # Perturbation scale: 1% of scene bbox extent.
+        bbox_extent = (points.max(0).values - points.min(0).values).norm().item()
+        noise_scale = 0.01 * bbox_extent
+        noise = torch.randn(repeated_points.shape, dtype=points.dtype,
+                            generator=rng) * noise_scale
+        # Don't perturb the original copy (first N rows).
+        noise[:points.shape[0]] = 0
+        points = repeated_points + noise
+        times_used = times_init.repeat(K)
+        obs_used = obs_used * K  # each replica reuses the same observability list
+        print(f"  [init_points_multiplier={K}] cloud replicated: "
+              f"N={points.shape[0]} (was {ds.N_points}), perturb scale={noise_scale:.4f}")
+    print(f"  Initializing {points.shape[0]} Gaussians (strategy={args.init_strategy})...")
+
     params = init_gaussians_from_points(
-        ds.points3D,
-        times_init,
+        points,
+        times_used,
         ds.cameras_per_frame,
         strategy=args.init_strategy,
-        observability=ds.observability,
+        observability=obs_used,
         sigma_init_sq=args.sigma_init_sq,
         opacity=0.5,
         sigma_k_pixel=1.0,
@@ -177,12 +253,14 @@ def main():
         fast_raster_config=FastRasterConfig(sigma_3d_blur=args.sigma_3d_blur),
         validation_every=max(args.log_every, args.num_iters // 10),
         static_baseline=args.static_baseline,
+        lambda_frob=args.lambda_frob,
+        opacity_reset_every=args.opacity_reset_every,
+        opacity_reset_logit=args.opacity_reset_logit,
+        lambda_aniso=args.lambda_aniso,
     )
     if val_indices_override is not None:
         cfg_kwargs["validation_frames"] = val_indices_override
-        cfg_kwargs["train_frames"] = [
-            i for i in range(ds.T) if i not in set(val_indices_override)
-        ]
+        cfg_kwargs["train_frames"] = train_indices_override
     config = TrainerConfig(**cfg_kwargs)
     trainer = Trainer.from_monocular_dataset(model, ds, config)
 

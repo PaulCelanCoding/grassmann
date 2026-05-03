@@ -78,6 +78,19 @@ class TrainerConfig:
     # within the same pipeline. The gap between this and the full temporal run
     # quantifies the value of time conditioning.
     static_baseline: bool = False
+    # Phase-A-correctness penalties (RCA: 32% dead, 30% high-aniso, 7% rank-1-collapsed):
+    #   lambda_frob: Frobenius-norm penalty on L_raw -- prevents the optimizer from
+    #     soft-collapsing rank by routing capacity into the n̂ direction (which the
+    #     projector annihilates). Recommended ~1e-4.
+    #   opacity_reset_every: every N iters, reset opacity_logit to opacity_reset_logit
+    #     (mirrors the standard 3DGS opacity-reset trick). 0 disables.
+    #   opacity_reset_logit: target logit for the reset (sigmoid(-5)≈0.007).
+    #   lambda_aniso: bounded anisotropy penalty on Σ_3D(t_0). Trims the runaway
+    #     λ_max/λ_min tail (p99 ≈ 6.8e7 in the unpenalized 50k checkpoint).
+    lambda_frob: float = 0.0
+    opacity_reset_every: int = 0
+    opacity_reset_logit: float = -5.0
+    lambda_aniso: float = 0.0
 
 
 FrameData = Union[Tensor, Callable[[int, float], Tensor]]
@@ -205,6 +218,25 @@ class Trainer:
             lpips_fn=self.lpips_fn,
             lambda_lpips=self.config.lambda_lpips,
         )
+        # Phase-A-correctness penalties.
+        if self.config.lambda_frob > 0.0:
+            # Mean-squared L_raw entries; targets the soft-rank-collapse pathology
+            # where the optimizer routes capacity into the projector's null direction.
+            loss = loss + self.config.lambda_frob * (self.model.L_raw ** 2).mean()
+        if self.config.lambda_aniso > 0.0:
+            # Bounded anisotropy penalty on Σ_3D(t_0). We recompute Σ_3D_t inside
+            # the model's forward graph by re-doing the projector + Schur — this
+            # is differentiable and adds modest cost (3x3 eigvalsh per Gaussian).
+            from .gaussian import compute_derived, condition_on_time
+            params_now = self.model.forward()
+            d = compute_derived(params_now)
+            tc = condition_on_time(params_now, d, t_0=t_value)
+            eigs = torch.linalg.eigvalsh(tc.Sigma_3D_t)             # (N, 3) ascending
+            lam_max = eigs[..., 2]
+            lam_min = eigs[..., 1]                                  # smallest non-zero
+            eps = 1e-8
+            aniso_normed = ((lam_max - lam_min) / (lam_max + lam_min + eps)) ** 2
+            loss = loss + self.config.lambda_aniso * aniso_normed.mean()
         with torch.no_grad():
             l1_val = l1_loss(rendered, target).item()
             mse_val = mse_loss(rendered, target).item()
@@ -293,6 +325,24 @@ class Trainer:
 
             if i % self.config.renormalize_every == 0:
                 self.renormalize_manifolds()
+
+            # Periodic opacity reset (Phase-A-correctness: addresses 32%-dead pathology).
+            if (self.config.opacity_reset_every > 0
+                    and i % self.config.opacity_reset_every == 0):
+                with torch.no_grad():
+                    self.model.opacity_logit.data.fill_(self.config.opacity_reset_logit)
+                # Also wipe Adam state for the opacity_logit param so the new logit
+                # is not immediately overridden by stale momentum.
+                for group in self.optimizer.param_groups:
+                    for p in group["params"]:
+                        if p is self.model.opacity_logit:
+                            state = self.optimizer.state.get(p, {})
+                            if "exp_avg" in state:
+                                state["exp_avg"].zero_()
+                            if "exp_avg_sq" in state:
+                                state["exp_avg_sq"].zero_()
+                print(f"  [opacity reset @ iter {i}] all logits -> "
+                      f"{self.config.opacity_reset_logit}")
 
             # Density control
             if (self.density_tracker is not None
