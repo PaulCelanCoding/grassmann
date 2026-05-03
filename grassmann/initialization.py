@@ -1,37 +1,30 @@
 """
-Initialize Grassmann Gaussians from a set of triangulated 3D points.
+Initialize Grassmann Gaussians (3-plane projector parameterization) from a
+set of triangulated 3D points.
 
-For each (3D point P_i, time t_i), we:
-  1. Pick a reference camera c_ref that observes P_i.
-  2. Build a line from c_ref through P_i (a RAY).
-  3. Construct a GaussianParams for that ray.
-  4. Set alpha_0 so the mean sits at depth |P_i - c_ref| along the ray.
-  5. Set beta_0 so the temporal center v_0 equals t_i.
-  6. Initialize covariance and opacity to small/moderate defaults.
-  7. Sample color from the reference image if available.
+Phase A intentionally exposes only the `random` strategy:
 
-Init strategies (passed via `strategy` arg):
-- "lookat" (default, legacy): ref cam = camera most directly facing the point.
-- "birth": ref cam = first frame that observes the point.
-- "median": ref cam = median observed frame. Recommended for monocular orbits
-  (e.g. DyCheck), where it minimizes the worst-case angle between the
-  initialized ray and any other rendering frame.
-- "random": skip the ray geometry. Sample (p, q) ~ Uniform(S^2 x S^2). Lets
-  training discover orientations; the ref-cam debate doesn't apply.
+  * `random` -- sample n ~ Uniform(S^3), L_raw ~ small isotropic Gaussian, and
+    set mu = (t_i, X_world_i). Lets training discover orientations without
+    biasing the rank-2 disk toward any particular ray. Matches the empirical
+    finding that random init was the only competitive strategy under the
+    legacy 2-plane parameterization (see
+    docs/issues/monocular_streak_and_density_control.md).
 
-The "birth" / "median" strategies require an observability list per point
-(see grassmann.datasets.MonocularDataset). The "lookat" strategy does not.
+The legacy ray-aware strategies (`lookat`, `birth`, `median`, `orthogonal`,
+`tripod`) targeted the rank-1 pathology and are no longer applicable under
+the 3-plane parameterization. They will be re-introduced in Phase B with
+semantically corrected geometry (e.g. `frontal`: n_hat aligned with the
+view ray, so the disk faces the init camera). For now, calling them raises
+NotImplementedError so misuse fails fast.
 """
 from __future__ import annotations
 
 from typing import Literal, Optional
 
-import numpy as np
 import torch
 from torch import Tensor
 
-from . import quaternion as Q
-from . import grassmann as G
 from .projection import Camera
 from .gaussian import GaussianParams
 
@@ -39,62 +32,37 @@ from .gaussian import GaussianParams
 DTYPE = torch.float64
 
 
-InitStrategy = Literal["lookat", "birth", "median", "random"]
+InitStrategy = Literal["lookat", "birth", "median", "random", "orthogonal", "tripod"]
 
 
-def pick_reference_camera(
-    X_world: Tensor,
-    cameras: list[Camera],
+def _phase_b_only(name: str) -> None:
+    raise NotImplementedError(
+        f"Init strategy {name!r} targets the legacy 2-plane parameterization and is not "
+        f"applicable to the 3-plane (G(3,4)) projector form. Use 'random' for Phase A; "
+        f"see docs/issues/monocular_streak_and_density_control.md and the plan in "
+        f"~/.claude/plans/grassmann-splatting-on-imperative-rocket.md for the Phase B "
+        f"re-introduction (`frontal` etc.)."
+    )
+
+
+def _random_n_and_L(
+    sigma_init_sq: float,
     *,
-    strategy: InitStrategy = "lookat",
-    observability_idx: Optional[list[int]] = None,
-) -> int:
-    """Pick a reference camera index for ray-init.
+    generator: Optional[torch.Generator] = None,
+    dtype: torch.dtype = DTYPE,
+) -> tuple[Tensor, Tensor]:
+    """Sample one random plane normal n in S^3 and one L_raw factor 4x3
+    targeting an in-plane covariance of approximately sigma_init_sq * (I - nn^T).
 
-    - "lookat":  camera most directly facing X_world (legacy; uses cameras only).
-    - "birth":   first frame in observability_idx (fallback: 0).
-    - "median":  middle frame in observability_idx (fallback: len(cameras)//2).
-    - "random":  not handled here; the caller should bypass ray-init entirely.
+    L_raw entries are i.i.d. N(0, sigma_L^2) with sigma_L = sqrt(sigma_init_sq / 3),
+    so E[L_raw L_raw^T] = sigma_init_sq * I_4 (rank-3 in expectation; one
+    direction is killed after the projector).
     """
-    if strategy == "birth":
-        if observability_idx:
-            return int(observability_idx[0])
-        return 0
-    if strategy == "median":
-        if observability_idx:
-            return int(observability_idx[len(observability_idx) // 2])
-        return len(cameras) // 2
-    if strategy == "random":
-        raise ValueError("'random' strategy bypasses ref-cam selection; the caller "
-                         "must handle it directly in init_gaussian_from_point.")
-    # "lookat" (legacy)
-    best_idx = 0
-    best_score = -float("inf")
-    for k, cam in enumerate(cameras):
-        forward_world = cam.R[2]
-        dir_to_pt = X_world - cam.c
-        dir_to_pt = dir_to_pt / dir_to_pt.norm().clamp_min(1e-12)
-        score = (forward_world * dir_to_pt).sum().item()
-        if score > best_score:
-            best_score = score
-            best_idx = k
-    return best_idx
-
-
-def _random_pq() -> tuple[Tensor, Tensor]:
-    """Sample (p, q) uniformly on S^2 x S^2 (as imaginary quaternions).
-    Reject samples with p . q <= -0.5 to avoid the antidiagonal singularity."""
-    while True:
-        p3 = torch.randn(3, dtype=DTYPE)
-        q3 = torch.randn(3, dtype=DTYPE)
-        p3 = p3 / p3.norm().clamp_min(1e-12)
-        q3 = q3 / q3.norm().clamp_min(1e-12)
-        if float((p3 * q3).sum().item()) > -0.5:
-            break
-    # Embed as full quaternions (real = 0).
-    p = torch.cat([torch.zeros(1, dtype=DTYPE), p3]).unsqueeze(0)   # (1, 4)
-    q = torch.cat([torch.zeros(1, dtype=DTYPE), q3]).unsqueeze(0)
-    return p, q
+    n = torch.randn(4, dtype=dtype, generator=generator)
+    n = n / n.norm().clamp_min(1e-12)
+    sigma_L = (sigma_init_sq / 3.0) ** 0.5
+    L_raw = torch.randn(4, 3, dtype=dtype, generator=generator) * sigma_L
+    return n, L_raw
 
 
 def init_gaussian_from_point(
@@ -103,137 +71,37 @@ def init_gaussian_from_point(
     cameras: list[Camera],
     *,
     color: Optional[Tensor] = None,
-    ref_cam_idx: Optional[int] = None,
-    strategy: InitStrategy = "lookat",
-    observability_idx: Optional[list[int]] = None,
-    sigma_aa: float = 0.02,
-    sigma_bb: float = 0.05,
-    sigma_ab: float = 0.0,
+    ref_cam_idx: Optional[int] = None,         # unused under 3-plane random
+    strategy: InitStrategy = "random",
+    observability_idx: Optional[list[int]] = None,  # unused under 3-plane random
+    sigma_init_sq: float = 0.02,
     opacity: float = 0.5,
     sigma_k_pixel: float = 1.0,
     sigma_k_temporal: float = 0.0,
+    generator: Optional[torch.Generator] = None,
 ) -> GaussianParams:
-    """Build a single Grassmann Gaussian from a 3D point P at time t.
+    """Build a single 3-plane Grassmann Gaussian from a 3D point P at time t.
 
-    X_world: (3,)
-    t:       scalar
-    cameras: list of K cameras (or T per-frame cameras for monocular)
-    color:   (3,) in [0, 1]; defaults to mid-gray.
-    ref_cam_idx:        which camera to build the ray from. If None and strategy
-                        is not "random", it is selected via pick_reference_camera.
-    strategy:           "lookat" | "birth" | "median" | "random". See module docstring.
-    observability_idx:  list of frame indices observing this point (used for
-                        "birth" / "median").
-
-    sigma_aa: variance along alpha (radial, along the ray). Controls how
-              thick the Gaussian is in depth.
-    sigma_bb: variance along beta (temporal). Controls how many frames the
-              Gaussian persists.
-    sigma_ab: coupling between alpha and beta. 0 means the Gaussian stays
-              put; nonzero couples depth-change with time-change (useful if
-              you know a priori that the point is moving in depth).
-    opacity:  initial opacity (before sigmoid). 0.5 is a moderate default.
-    sigma_k_pixel:    pixel-space blur variance (rasterizer EWA).
-    sigma_k_temporal: temporal blur variance (added to Sigma_tt for w_t).
-
-    Returns a GaussianParams object containing a single Gaussian (N=1).
+    `cameras`, `ref_cam_idx`, `observability_idx` are accepted for signature
+    compatibility with the monocular dataset wiring but are unused for the
+    `random` strategy (no ref camera dependence).
     """
+    if strategy != "random":
+        _phase_b_only(strategy)
+
     if color is None:
         color = torch.full((3,), 0.5, dtype=DTYPE)
 
-    # Cholesky of Sigma_k. Needed for both ray-init and random branches.
-    sa = np.sqrt(sigma_aa)
-    L10 = sigma_ab / sa
-    inner = sigma_bb - sigma_ab * sigma_ab / sigma_aa
-    if inner <= 0:
-        raise ValueError(f"Invalid Sigma_k (not PD): inner = {inner}")
-    L11 = np.sqrt(inner)
-    L = torch.tensor([[[sa, 0.0], [L10, L11]]], dtype=DTYPE)
-
-    # --- Random strategy: bypass ref-cam ray geometry ---
-    if strategy == "random":
-        p_quat, q_quat = _random_pq()
-        e1_hat, e2_hat = G.orthonormal_basis(p_quat, q_quat)
-        target = torch.cat(
-            [torch.tensor([[float(t)]], dtype=DTYPE), X_world.unsqueeze(0)], dim=-1
-        )
-        alpha_val = (target * e1_hat).sum(dim=-1)
-        beta_val = (target * e2_hat).sum(dim=-1)
-        return GaussianParams(
-            p_im=Q.imag(p_quat),
-            q_im=Q.imag(q_quat),
-            alpha_0=alpha_val,
-            beta_0=beta_val,
-            L=L,
-            opacity=torch.tensor([opacity], dtype=DTYPE),
-            color=color.unsqueeze(0),
-            sigma_k_pixel=sigma_k_pixel,
-            sigma_k_temporal=sigma_k_temporal,
-        )
-
-    # --- Ray-init strategies ---
-    if ref_cam_idx is None:
-        ref_cam_idx = pick_reference_camera(
-            X_world, cameras,
-            strategy=strategy, observability_idx=observability_idx,
-        )
-
-    ref_cam = cameras[ref_cam_idx]
-
-    # Direction from camera center TOWARD the point, in WORLD coordinates.
-    dir_world = X_world - ref_cam.c                                        # (3,)
-    dist = dir_world.norm().clamp_min(1e-8)
-    u_hat_world = dir_world / dist                                          # (3,)
-
-    # Build a line IN WORLD COORDINATES passing through ref_cam.c in direction u_hat_world.
-    # To make (t, X_world) lie EXACTLY in the resulting plane E_{p,q}, we scale
-    # the line's foot-of-perpendicular: use x_line = ref_cam.c / t instead of ref_cam.c.
-    # This is equivalent to saying the Grassmann plane phi_t(L) = span{(t, t*y_std), (0, u_hat)},
-    # which we achieve by calling line_to_pq on the scaled x_line (since that produces
-    # the plane span{(1, y_std/t), (0, u_hat)} = span{(t, y_std), (0, u_hat)} = phi_t(L)).
-    #
-    # Edge case: if t == 0 we cannot scale. In practice t > 0 in all reasonable use cases.
-    t_float = float(t)
-    if abs(t_float) < 1e-8:
-        # Fallback: use unscaled (gives the plane for t=1; small residual in V_k at t=0).
-        x_line = ref_cam.c.unsqueeze(0)
-    else:
-        x_line = (ref_cam.c / t_float).unsqueeze(0)                         # (1, 3)
-    u_line = u_hat_world.unsqueeze(0)                                       # (1, 3)
-    p_quat, q_quat = G.line_to_pq(x_line, u_line)                           # (1, 4), (1, 4)
-
-    # Place the Gaussian mean at X_world. In the canonical basis:
-    #   v = alpha_0 * e1_hat + beta_0 * e2_hat  must have spatial part = X_world
-    #                                                and time part = t.
-    # We solve this as an R^4 linear system in (alpha_0, beta_0).
-    e1_hat, e2_hat = G.orthonormal_basis(p_quat, q_quat)                    # (1, 4)
-    # Target v in R^4: (t, X_world)
-    target = torch.cat([torch.tensor([[float(t)]], dtype=DTYPE), X_world.unsqueeze(0)], dim=-1)  # (1, 4)
-
-    # Solve: [e1_hat, e2_hat]^T @ [alpha; beta] = target
-    # In practice, target may not lie exactly in span{e1_hat, e2_hat} (the plane
-    # E_{p,q}) due to the way line_to_pq works. But (1, y) IS in E_{p,q} where
-    # y is the standard-form point of THIS line. By construction X_world lies on
-    # our line, so (1, X_world) lies in the plane spanned by (1, y) and (0, u_hat).
-    # However (t, X_world) only lies in the plane if t happens to equal a specific
-    # value tied to |X_world - y|. In general, the time coordinate of the canonical
-    # embedding is NOT freely adjustable.
-    #
-    # Solution: project (t, X_world) onto the plane span{e1_hat, e2_hat} using
-    # least squares. The projection gives the best-fit (alpha_0, beta_0); any
-    # residual is absorbed into the loss, and training will adjust p, q to reduce it.
-    # For initialization this small residual is harmless.
-    #
-    # Inner products (both basis vectors are orthonormal).
-    alpha_val = (target * e1_hat).sum(dim=-1)                               # (1,)
-    beta_val = (target * e2_hat).sum(dim=-1)                                # (1,)
+    n, L_raw = _random_n_and_L(sigma_init_sq, generator=generator, dtype=DTYPE)
+    mu = torch.cat(
+        [torch.tensor([float(t)], dtype=DTYPE), X_world.to(dtype=DTYPE)],
+        dim=0,
+    )                                                   # (4,)
 
     return GaussianParams(
-        p_im=Q.imag(p_quat),
-        q_im=Q.imag(q_quat),
-        alpha_0=alpha_val,
-        beta_0=beta_val,
-        L=L,
+        n=n.unsqueeze(0),
+        L_raw=L_raw.unsqueeze(0),
+        mu=mu.unsqueeze(0),
         opacity=torch.tensor([opacity], dtype=DTYPE),
         color=color.unsqueeze(0),
         sigma_k_pixel=sigma_k_pixel,
@@ -242,28 +110,27 @@ def init_gaussian_from_point(
 
 
 def init_gaussians_from_points(
-    points: Tensor,          # (N, 3)
-    times: Tensor,           # (N,)
+    points: Tensor,                                # (N, 3)
+    times: Tensor,                                 # (N,)
     cameras: list[Camera],
     *,
-    colors: Optional[Tensor] = None,   # (N, 3)
-    strategy: InitStrategy = "lookat",
-    observability: Optional[list[list[int]]] = None,  # length N (per-point frame lists)
-    sigma_aa: float = 0.02,
-    sigma_bb: float = 0.05,
-    sigma_ab: float = 0.0,
+    colors: Optional[Tensor] = None,               # (N, 3)
+    strategy: InitStrategy = "random",
+    observability: Optional[list[list[int]]] = None,
+    sigma_init_sq: float = 0.02,
     opacity: float = 0.5,
     sigma_k_pixel: float = 1.0,
     sigma_k_temporal: float = 0.0,
+    seed: Optional[int] = None,
 ) -> GaussianParams:
     """Initialize a batch of Gaussians from a set of (point, time) pairs.
 
-    Each row (points[i], times[i]) becomes one Gaussian.
-    Returns a single GaussianParams containing all N Gaussians.
-
-    `strategy` and `observability` are passed through to init_gaussian_from_point;
-    see its docstring for the strategy semantics.
+    Each row (points[i], times[i]) becomes one 3-plane Gaussian via the
+    `random` strategy.
     """
+    if strategy != "random":
+        _phase_b_only(strategy)
+
     N = points.shape[0]
     if colors is None:
         colors = torch.full((N, 3), 0.5, dtype=DTYPE)
@@ -272,28 +139,26 @@ def init_gaussians_from_points(
             f"observability has length {len(observability)} but expected N={N}"
         )
 
-    per_gaussian = [
-        init_gaussian_from_point(
-            points[i], float(times[i].item()), cameras,
-            color=colors[i],
-            strategy=strategy,
-            observability_idx=(observability[i] if observability is not None else None),
-            sigma_aa=sigma_aa, sigma_bb=sigma_bb, sigma_ab=sigma_ab,
-            opacity=opacity,
-            sigma_k_pixel=sigma_k_pixel,
-            sigma_k_temporal=sigma_k_temporal,
-        )
-        for i in range(N)
-    ]
+    generator = None
+    if seed is not None:
+        generator = torch.Generator()
+        generator.manual_seed(int(seed))
+
+    sigma_L = (sigma_init_sq / 3.0) ** 0.5
+    n_all = torch.randn(N, 4, dtype=DTYPE, generator=generator)
+    n_all = n_all / n_all.norm(dim=-1, keepdim=True).clamp_min(1e-12)        # (N, 4)
+    L_raw_all = torch.randn(N, 4, 3, dtype=DTYPE, generator=generator) * sigma_L  # (N, 4, 3)
+    mu_all = torch.cat(
+        [times.to(dtype=DTYPE).unsqueeze(-1), points.to(dtype=DTYPE)],
+        dim=-1,
+    )                                                                         # (N, 4)
 
     return GaussianParams(
-        p_im=torch.cat([g.p_im for g in per_gaussian]),
-        q_im=torch.cat([g.q_im for g in per_gaussian]),
-        alpha_0=torch.cat([g.alpha_0 for g in per_gaussian]),
-        beta_0=torch.cat([g.beta_0 for g in per_gaussian]),
-        L=torch.cat([g.L for g in per_gaussian]),
-        opacity=torch.cat([g.opacity for g in per_gaussian]),
-        color=torch.cat([g.color for g in per_gaussian]),
+        n=n_all,
+        L_raw=L_raw_all,
+        mu=mu_all,
+        opacity=torch.full((N,), float(opacity), dtype=DTYPE),
+        color=colors.to(dtype=DTYPE),
         sigma_k_pixel=sigma_k_pixel,
         sigma_k_temporal=sigma_k_temporal,
     )
@@ -314,7 +179,6 @@ def sample_color_from_image(image: Tensor, uv: Tensor) -> Tensor:
         ui, vi = int(round(u)), int(round(v))
         return image[vi, ui]
     else:
-        # Batched
         us = uv[:, 0].clamp(0, W - 1).round().long()
         vs = uv[:, 1].clamp(0, H - 1).round().long()
         return image[vs, us]

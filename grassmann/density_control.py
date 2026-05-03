@@ -39,12 +39,14 @@ Public API:
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 import torch
 from torch import Tensor, nn
 
+from . import quaternion as Q
 from .gaussian import GaussianParams, compute_derived
 from .trainable import TrainableGaussians, build_optimizer
 
@@ -62,6 +64,10 @@ class DensityConfig:
 
     Most defaults mirror standard 3DGS. Tune `opacity_threshold` and the
     `grad_threshold` for your scene — higher thresholds => fewer Gaussians.
+
+    The flags `use_3d_threshold`, `correct_shrinkage`, and `diversify_split_pq`
+    enable the three 2026-05 monocular-DC fixes. Off by default so legacy
+    behavior is preserved unless explicitly opted into.
     """
     opacity_threshold: float = 0.005     # prune if sigmoid(opacity_logit) < this
     scale_min: float = 1e-4              # prune if smallest Sigma_k eigenvalue < this
@@ -71,6 +77,19 @@ class DensityConfig:
                                          # otherwise                      -> SPLIT
     split_shrink_factor: float = 1.6     # new splats have sigma / phi
     split_spatial_offset_sigmas: float = 1.0  # how many sigmas apart to place new splats
+    # ----- 2026-05 fixes for monocular Grassmann DC (default off) -----
+    use_3d_threshold: bool = False       # decide clone/split on Σ_3D(t_0) λ_max
+                                         # (streak length in 3D meters), not Σ_k λ_max.
+                                         # Threshold uses `streak_length_threshold`.
+    streak_length_threshold: float = 0.05  # when use_3d_threshold=True, Gaussians
+                                         # with √λ_max(Σ_3D(t_0)) < this metres CLONE.
+    correct_shrinkage: bool = False      # split shrinks L by phi (variance / phi²)
+                                         # to match standard 3DGS, instead of the
+                                         # legacy L /= sqrt(phi) (variance / phi only).
+    diversify_split_pq: bool = False     # split children get NEW (p, q) basis with
+                                         # rank-1 axis rotated perpendicular to the
+                                         # parent's j_a — the only way splits add
+                                         # orientational coverage.
 
 
 class DensityTracker:
@@ -93,6 +112,14 @@ class DensityTracker:
         model: TrainableGaussians,
         optimizer: Optional[torch.optim.Optimizer] = None,
     ):
+        raise NotImplementedError(
+            "DensityTracker targets the legacy 2-plane parameterization (p_im, q_im, "
+            "alpha_0, beta_0, L). Under the 3-plane (G(3,4)) projector form it is "
+            "disabled in Phase A — densify_every defaults to 0 in TrainerConfig and "
+            "scripts/train_mono.py. See the plan in "
+            "~/.claude/plans/grassmann-splatting-on-imperative-rocket.md, Phase C."
+        )
+        # --- legacy code below kept for reference; never executed in Phase A ---
         self.model = model
         self.optimizer = optimizer
         device = model.alpha_0.device
@@ -249,6 +276,25 @@ class DensityTracker:
         L = torch.tril(self.model.L.data)
         return L @ L.transpose(-1, -2)
 
+    def _streak_length_3d(self) -> Tensor:
+        """λ_max(Σ_3D(t_0)).sqrt() per Gaussian — the rank-1 streak length in 3D.
+
+        This is the physically meaningful "size" of each Gaussian as it would
+        actually be rendered. Used by the use_3d_threshold density-control branch.
+        Computed at each Gaussian's own v_0 so we get the actual streak the
+        Gaussian renders at its peak temporal weight.
+        """
+        with torch.no_grad():
+            params = self.model.forward()
+            d = compute_derived(params)
+            sigma_tt_pure = getattr(d, "_sigma_tt_pure", d.Sigma_tt)
+            inv_stt = 1.0 / sigma_tt_pure.clamp_min(1e-20)
+            cw = d.c_world                                          # (N, 3)
+            outer = cw.unsqueeze(-1) * cw.unsqueeze(-2)             # (N, 3, 3)
+            Sigma_3D_t = d.Sigma_3D - inv_stt.unsqueeze(-1).unsqueeze(-1) * outer
+            ev = torch.linalg.eigvalsh(Sigma_3D_t)                  # (N, 3) ascending
+            return ev[:, -1].clamp_min(0).sqrt()                    # (N,) streak length
+
     def clone_and_split(self, config: DensityConfig) -> tuple[int, int]:
         """Clone small, over-stressed Gaussians and split large, over-stressed ones.
 
@@ -260,11 +306,18 @@ class DensityTracker:
             return 0, 0
 
         with torch.no_grad():
-            Sigma_k = self._sigma_k()
-            eig = torch.linalg.eigvalsh(Sigma_k)            # (N, 2)
-            max_eigval = eig[:, 1]                          # largest eigenvalue
-            small_mask = stressed & (max_eigval < config.clone_scale_threshold)
-            large_mask = stressed & ~small_mask
+            if config.use_3d_threshold:
+                # Decide on the rank-1 axis length in 3D (the actual streak length
+                # in scene metres), not on the (α, β) eigenvalues.
+                streak_len = self._streak_length_3d()
+                small_mask = stressed & (streak_len < config.streak_length_threshold)
+                large_mask = stressed & ~small_mask
+            else:
+                Sigma_k = self._sigma_k()
+                eig = torch.linalg.eigvalsh(Sigma_k)            # (N, 2)
+                max_eigval = eig[:, 1]                          # largest eigenvalue
+                small_mask = stressed & (max_eigval < config.clone_scale_threshold)
+                large_mask = stressed & ~small_mask
 
         n_cloned = int(small_mask.sum().item())
         n_split = int(large_mask.sum().item())
@@ -300,6 +353,15 @@ class DensityTracker:
         mean along the PRINCIPAL direction of Sigma_k in (alpha, beta)-space.
         That direction, when projected through J_embed, is also the major
         spatial axis in R^3 — so the offset is physically meaningful.
+
+        With config.correct_shrinkage=True, L is divided by phi (not sqrt(phi))
+        to match the standard 3DGS variance-shrinkage of phi^2.
+
+        With config.diversify_split_pq=True, each child gets a NEW (p, q) basis
+        whose rank-1 axis is rotated perpendicular to the parent's. This
+        introduces orientational diversity (parent's children render along
+        different axes), which is the only way splits add coverage to scenes
+        where the streaks are misoriented.
         """
         idx = torch.nonzero(split_mask, as_tuple=True)[0]
         n = idx.numel()
@@ -323,35 +385,143 @@ class DensityTracker:
             new_beta_plus = self.model.beta_0.data[idx] + d_beta
             new_beta_minus = self.model.beta_0.data[idx] - d_beta
 
-            # New L: shrink by phi. Since Sigma = L L^T scales quadratically with L,
-            # divide L by sqrt(phi) to reduce variance by phi.
-            new_L = L_orig / (phi ** 0.5)
-            # Copy for each of the two offset Gaussians.
+            # Shrinkage: legacy=L/sqrt(phi) -> Σ/phi; correct=L/phi -> Σ/phi^2 (matches 3DGS).
+            shrink_div = phi if config.correct_shrinkage else (phi ** 0.5)
+            new_L = L_orig / shrink_div
             new_L_plus = new_L.clone()
             new_L_minus = new_L.clone()
 
-            # Other parameters: copy directly.
-            p_im_copy = self.model.p_im.data[idx].clone()
-            q_im_copy = self.model.q_im.data[idx].clone()
             opacity_copy = self.model.opacity_logit.data[idx].clone()
             color_copy = self.model.color_logit.data[idx].clone()
 
-            # Append both the plus-copy and the minus-copy (2n new rows).
-            self._append_rows(
-                p_im=torch.cat([p_im_copy, p_im_copy], dim=0),
-                q_im=torch.cat([q_im_copy, q_im_copy], dim=0),
-                alpha_0=torch.cat([new_alpha_plus, new_alpha_minus], dim=0),
-                beta_0=torch.cat([new_beta_plus, new_beta_minus], dim=0),
-                L=torch.cat([new_L_plus, new_L_minus], dim=0),
-                opacity_logit=torch.cat([opacity_copy, opacity_copy], dim=0),
-                color_logit=torch.cat([color_copy, color_copy], dim=0),
-            )
+            if config.diversify_split_pq:
+                # Compute the parent's rank-1 axis j_a_parent in 3D for each split.
+                # Build NEW (p, q) for each child rotated perpendicular to j_a_parent.
+                # The 2 children are placed along 2 orthogonal directions perp to j_a_parent.
+                p_plus, q_plus, alpha_p, beta_p = self._build_diversified_children(
+                    idx, new_alpha_plus, new_beta_plus, axis_seed=0,
+                )
+                p_minus, q_minus, alpha_m, beta_m = self._build_diversified_children(
+                    idx, new_alpha_minus, new_beta_minus, axis_seed=1,
+                )
+                # Σ_k cannot be carried across a (p,q) basis change — its physical
+                # meaning depends on (e1_hat, e2_hat). Reset to init values so the
+                # child starts as a fresh Gaussian at the offset position with the
+                # rotated orientation. (The shrinkage logic doesn't apply here since
+                # we are not subdividing the parent's covariance.)
+                init_L_row = torch.zeros(2, 2, dtype=new_L.dtype, device=new_L.device)
+                init_L_row[0, 0] = math.sqrt(0.02)        # init σ_aa
+                init_L_row[1, 1] = math.sqrt(0.05)        # init σ_bb
+                fresh_L = init_L_row.expand(n, 2, 2).clone()
+                self._append_rows(
+                    p_im=torch.cat([p_plus, p_minus], dim=0),
+                    q_im=torch.cat([q_plus, q_minus], dim=0),
+                    alpha_0=torch.cat([alpha_p, alpha_m], dim=0),
+                    beta_0=torch.cat([beta_p, beta_m], dim=0),
+                    L=torch.cat([fresh_L, fresh_L.clone()], dim=0),
+                    opacity_logit=torch.cat([opacity_copy, opacity_copy], dim=0),
+                    color_logit=torch.cat([color_copy, color_copy], dim=0),
+                )
+            else:
+                p_im_copy = self.model.p_im.data[idx].clone()
+                q_im_copy = self.model.q_im.data[idx].clone()
+                self._append_rows(
+                    p_im=torch.cat([p_im_copy, p_im_copy], dim=0),
+                    q_im=torch.cat([q_im_copy, q_im_copy], dim=0),
+                    alpha_0=torch.cat([new_alpha_plus, new_alpha_minus], dim=0),
+                    beta_0=torch.cat([new_beta_plus, new_beta_minus], dim=0),
+                    L=torch.cat([new_L_plus, new_L_minus], dim=0),
+                    opacity_logit=torch.cat([opacity_copy, opacity_copy], dim=0),
+                    color_logit=torch.cat([color_copy, color_copy], dim=0),
+                )
 
         # Now remove the originals (they're replaced by the two new splits).
         keep_mask = torch.ones(self.model.alpha_0.shape[0], dtype=torch.bool,
                                 device=self.model.alpha_0.device)
         keep_mask[idx] = False
         self._keep_rows(keep_mask)
+
+    def _build_diversified_children(
+        self,
+        parent_idx: Tensor,
+        child_alpha_old: Tensor,   # (n,) — α₀ on parent's basis (used as throwaway,
+                                   # we'll recompute via projection on the new basis)
+        child_beta_old: Tensor,    # (n,)
+        *,
+        axis_seed: int,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        """Build new (p, q, α₀, β₀) for split children with rotated rank-1 axes.
+
+        For each parent: compute parent's j_a (3D rank-1 axis), pick a perpendicular
+        direction, and build a new basis whose rank-1 axis is along that perpendicular.
+        Then project the parent's V_k onto the new basis to get (α₀, β₀).
+
+        axis_seed=0 picks the first orthogonal-frame direction; seed=1 picks the
+        cross-product (so the two children get mutually orthogonal new axes).
+
+        Returns (p_im, q_im, alpha_0, beta_0) each (n, ...).
+        """
+        from .grassmann import line_to_pq, canonical_frame, orthonormal_basis
+        import math as _m
+
+        params = self.model.forward()
+        # Parents only — slice via parent_idx.
+        p_par = params.p()[parent_idx]                              # (n, 4)
+        q_par = params.q()[parent_idx]                              # (n, 4)
+        # j_a = spatial part of e1_hat = r·d. Direction = (p_im+q_im)/|p_im+q_im|.
+        d_vec = (Q.imag(p_par) + Q.imag(q_par))                     # (n, 3)
+        d_norm = d_vec.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+        ja_dir = d_vec / d_norm                                     # (n, 3)
+        # Pick orthogonal direction: use (axis_seed==0) → cross with global up
+        #                                 (axis_seed==1) → cross with ja_dir × up
+        device = ja_dir.device; dtype = ja_dir.dtype
+        up = torch.tensor([0.0, 0.0, 1.0], dtype=dtype, device=device).expand_as(ja_dir).clone()
+        # Where ja_dir is near-parallel to up, swap to right.
+        right = torch.tensor([1.0, 0.0, 0.0], dtype=dtype, device=device).expand_as(ja_dir).clone()
+        parallel = (ja_dir * up).sum(-1, keepdim=True).abs() > 0.99
+        up = torch.where(parallel, right, up)
+        t1 = torch.cross(ja_dir, up, dim=-1)
+        t1 = t1 / t1.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+        t2 = torch.cross(ja_dir, t1, dim=-1)
+        t2 = t2 / t2.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+        new_axis = t1 if axis_seed == 0 else t2
+
+        # Child V_k = parent V_k + offset (approx — same as legacy split, parent's basis).
+        # We use the offset (α, β) on parent basis to compute child V_k directly.
+        d_par = compute_derived(GaussianParams(
+            p_im=Q.imag(p_par), q_im=Q.imag(q_par),
+            alpha_0=params.alpha_0[parent_idx],
+            beta_0=params.beta_0[parent_idx],
+            L=params.L[parent_idx],
+            opacity=params.opacity[parent_idx],
+            color=params.color[parent_idx],
+            sigma_k_pixel=params.sigma_k_pixel,
+            sigma_k_temporal=params.sigma_k_temporal,
+        ))
+        # Map (α_child, β_child) back to V_k: V_k_child = α·j_a + β·j_b + temporal (skip).
+        # Easier: compute the child V_k using the basis directly.
+        e1_hat_par, e2_hat_par = orthonormal_basis(p_par, q_par)
+        # v_child = α·e1_hat + β·e2_hat (in R^4 = (R, R^3))
+        v_child = (child_alpha_old.unsqueeze(-1) * e1_hat_par
+                   + child_beta_old.unsqueeze(-1) * e2_hat_par)    # (n, 4)
+        V_k_child = Q.imag(v_child)                                 # (n, 3)
+        v0_child = Q.real(v_child)                                  # (n,)
+
+        # Build new (p, q) via line_to_pq through the child's V_k along new_axis.
+        # Use the t-scaling trick for v0_child.
+        v0_safe = torch.where(v0_child.abs() < 1e-8,
+                              torch.full_like(v0_child, 1.0),
+                              v0_child)
+        x_line = V_k_child / v0_safe.unsqueeze(-1)                  # (n, 3)
+        new_p, new_q = line_to_pq(x_line, new_axis)                 # (n, 4) each
+
+        # Project (v0_child, V_k_child) onto the new basis to get α₀, β₀.
+        e1_hat_new, e2_hat_new = orthonormal_basis(new_p, new_q)
+        target = torch.cat([v0_child.unsqueeze(-1), V_k_child], dim=-1)   # (n, 4)
+        new_alpha = (target * e1_hat_new).sum(dim=-1)
+        new_beta = (target * e2_hat_new).sum(dim=-1)
+
+        return Q.imag(new_p), Q.imag(new_q), new_alpha, new_beta
 
     # --- Convenience wrapper ---
 

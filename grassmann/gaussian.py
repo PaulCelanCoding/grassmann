@@ -1,35 +1,49 @@
 """
-Gaussian model: a container for the parameters of one or more Grassmann Gaussians,
-together with the derived quantities needed for rendering.
+Gaussian model: container for Grassmann Gaussian parameters and the
+view-independent derived quantities the rasterizer needs.
 
-Following the Jacobian paper §9 "Implementation Recipe", each Gaussian is
-parameterized by:
+**Parameterization (3-plane G(3,4), projector form).**
 
-  * p, q       in S^2         (2 DOF each)       -- identifies the plane E_{p,q}
-  * alpha_0    in R             (1 DOF)          -- local coord of mean along e1_hat
-  * beta_0     in R             (1 DOF)          -- local coord of mean along e2_hat
-  * Sigma_k    in Sym+(2)       (3 DOF)          -- 2x2 covariance in (alpha, beta)
-                                                    parameterized via L s.t. Sigma = L L^T
-  * opacity    in [0, 1]        (1 DOF)          -- base opacity
-  * color      in R^3           (3 DOF, simple)  -- RGB; spherical harmonics deferred
-  * sigma_k_pixel    scalar     -- isotropic screen-space (pixel-domain) blur variance
-  * sigma_k_temporal scalar     -- additive temporal smoothing variance
+Each Gaussian is parameterized by:
+  * n  in S^3                (3 DOF, plane normal in R^4)
+  * L_raw  in R^(4x3)        (12 raw scalars; column space gets projected)
+  * mu in R^4                (mean in space-time; component along n is invisible
+                              after projection -> 3 effective DOF)
+  * opacity in [0, 1]
+  * color   in R^3
+  * sigma_k_pixel    scalar  (rasterizer EWA blur)
+  * sigma_k_temporal scalar  (additive temporal smoothing for w_t only)
 
-Total geometry: 9 DOF (matches standard 3DGS). Plus opacity + color.
+The plane E_{n} subset R^4 is the orthogonal complement of n in R^4 -- a
+3-dimensional subspace. The projector P_n = I - n n^T sends any vector
+into E_{n}; the in-plane covariance is
 
-The math spec (gradient note v6, §6) defines a single sigma_k acting jointly on
-the (pixel x time) observation. We split it into two scalars because the natural
-scales differ: pixel space is ~O(1) px^2; the temporal axis spans the frame
-range. Keeping them as one field forced a workaround (sigma_k=20 in the legacy
-N3DV trainer) that masked an unrelated bug. See docs/issues/rca_streak_collapse.md
-"Bug B".
+    Sigma_4D = (P_n L_raw)(P_n L_raw)^T          (4x4 PSD, rank <= 3,
+                                                  ker contains span(n))
 
-This module computes the derived quantities from the parameters:
-  - V_k = spatial part of v = alpha_0 * e1_hat + beta_0 * e2_hat (world coords)
-  - v_0 = time part of v
-  - Sigma_3D = J_embed Sigma_k J_embed^T (rank-2, 3x3)
-  - Sigma_tt = r^2 (1+c)^2 sigma_bb + sigma_k_temporal (eq. 32, with split sigma_k)
-  - c_world = r(1+c) J_embed @ (sigma_ab, sigma_bb)^T (eq. 43)
+Block-decomposing along the time axis e0,
+
+    Sigma_4D = [[ sigma_tt   c^T  ],     mu = (mu_t, mu_x)
+                [ c          Sigma_3D_full ]]
+
+time-conditioning at t = t0 is the standard Schur complement, identical
+to the legacy 2-plane code path:
+
+    Sigma_3D(t0) = Sigma_3D_full - c c^T / sigma_tt    (rank <= 2: a disk)
+    mu_3D(t0)   = mu_x + c (t0 - mu_t) / sigma_tt
+    w_t         = exp(-(t0 - mu_t)^2 / (2 sigma_tt))
+
+This module exposes the same DerivedQuantities and condition_on_time
+contract that the legacy 2-plane parameterization used, so
+`fast_rasterizer.py`, the trainer, and the means2D-grad wiring need no
+changes when the parameterization is swapped under them.
+
+History: the legacy 2-plane G(2,4) parameterization (p, q in S^2, alpha_0,
+beta_0 in R, L in R^(2x2)) gave a rank-1 Sigma_3D(t0) which empirically
+plateaued at L1 ~ 0.108 on slice-banana (see
+docs/issues/monocular_streak_and_density_control.md). The 3-plane
+reformulation makes Sigma_3D(t0) rank-2 (a disk in 3D) and removes the
+view-axis-pinning pathology by construction.
 """
 from __future__ import annotations
 
@@ -38,70 +52,53 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor
 
-from . import quaternion as Q
-from . import grassmann as G
-from . import jacobian as Jac
-
 
 @dataclass
 class GaussianParams:
-    """Raw parameters of a batch of Grassmann Gaussians.
+    """Raw parameters of a batch of Grassmann Gaussians (3-plane form).
 
-    All tensors are batched with leading shape (N,) for N Gaussians.
+    All tensors are batched with leading shape (N,).
 
-    p_im, q_im: the imaginary parts of p, q (we store R^3 unit vectors for
-                simplicity of optimization; .unit_imag() is applied on demand).
-    alpha_0, beta_0: mean coords in E_{p,q} basis, shape (N,).
-    L: lower-triangular 2x2 factor of Sigma_k so that Sigma_k = L L^T.
-       Stored as shape (N, 2, 2). This parameterization makes Sigma_k SPD by construction.
-    opacity: shape (N,), typically passed through sigmoid if trained.
-    color: shape (N, 3).
-    sigma_k_pixel:    pixel^2 blur variance, added to the 2D screen-space cov.
-    sigma_k_temporal: temporal blur variance, added to Sigma_tt for the w_t weight.
+    n:        (N, 4)    Unit plane normal in S^3 (caller should pass already-
+                        normalized values; TrainableGaussians.forward() does so).
+    L_raw:    (N, 4, 3) Unconstrained Cholesky-like factor; the column space
+                        is projected onto E_{n} on demand by compute_derived.
+    mu:       (N, 4)    Mean in R^4 = (time, space).
+    opacity:  (N,)      In [0, 1].
+    color:    (N, 3)    RGB in [0, 1].
+    sigma_k_pixel:    pixel-domain blur (rasterizer EWA), scalar.
+    sigma_k_temporal: temporal blur added to Sigma_tt for the w_t weight only
+                      (not for the Schur complement, so the rank-2 property
+                      of Sigma_3D(t0) remains exact).
     """
-    p_im: Tensor                    # (N, 3)
-    q_im: Tensor                    # (N, 3)
-    alpha_0: Tensor                 # (N,)
-    beta_0: Tensor                  # (N,)
-    L: Tensor                       # (N, 2, 2)  lower-triangular
+    n: Tensor                       # (N, 4)
+    L_raw: Tensor                   # (N, 4, 3)
+    mu: Tensor                      # (N, 4)
     opacity: Tensor                 # (N,)
     color: Tensor                   # (N, 3)
-    sigma_k_pixel: float = 1.0      # +sigma^2 I term in 2D EWA cov (rasterizer)
-    sigma_k_temporal: float = 0.0   # +sigma^2 in Sigma_tt for temporal weight w_t
+    sigma_k_pixel: float = 1.0
+    sigma_k_temporal: float = 0.0
 
     @property
     def N(self) -> int:
-        return self.p_im.shape[0]
-
-    def p(self) -> Tensor:
-        """Unit imaginary quaternion p, shape (N, 4)."""
-        return Q.unit_imag(self.p_im)
-
-    def q(self) -> Tensor:
-        """Unit imaginary quaternion q, shape (N, 4)."""
-        return Q.unit_imag(self.q_im)
-
-    def Sigma_k(self) -> Tensor:
-        """Covariance in local (alpha, beta) coords, shape (N, 2, 2), SPD."""
-        # Sigma_k = L L^T where L is lower-triangular.
-        # Zero out the upper triangle of L first to ensure strict lower-triangular.
-        L = torch.tril(self.L)
-        return L @ L.transpose(-1, -2)
+        return self.n.shape[0]
 
 
-# ---- Derived quantities: done in WORLD coordinates, per Jacobian paper §9 ---
+# ---- Derived quantities: done in WORLD coordinates, per the projector recipe.
 
 @dataclass
 class DerivedQuantities:
     """View-independent quantities derived from GaussianParams.
 
-    Computed once per Gaussian (or whenever p, q, alpha, beta, L change).
-    All shapes have leading batch (N,).
+    Computed once per forward pass. Same field names as the legacy 2-plane
+    DerivedQuantities so condition_on_time / fast_rasterizer / training are
+    parameterization-agnostic.
 
-    V_k:       (N, 3)     Spatial mean in WORLD coords.
-    v_0:       (N,)       Temporal mean.
-    Sigma_3D:  (N, 3, 3)  View-independent 3D covariance (rank 2).
-    Sigma_tt:  (N,)       Temporal variance.
+    V_k:       (N, 3)     Spatial mean in WORLD coords (= mu[..., 1:]).
+    v_0:       (N,)       Temporal mean (= mu[..., 0]).
+    Sigma_3D:  (N, 3, 3)  Spatial block of Sigma_4D (rank <= 3 -- pre-Schur).
+    Sigma_tt:  (N,)       Temporal variance, BLURRED with sigma_k_temporal
+                          (used for the w_t fall-off).
     c_world:   (N, 3)     Spatial-temporal cross-covariance vector.
     """
     V_k: Tensor
@@ -112,65 +109,46 @@ class DerivedQuantities:
 
 
 def compute_derived(params: GaussianParams) -> DerivedQuantities:
-    """Compute all view-independent derived quantities from raw parameters.
+    """Compute view-independent derived quantities from the 3-plane projector
+    parameterization.
 
-    This implements steps 1-5 of §9.2 "The algorithm" in the Jacobian paper.
-
-    NOTE on temporal variance.
-    The paper's eq. (32) defines Sigma_tt = r^2(1+c)^2 sigma_bb + sigma_k^2.
-    This value is used in two places:
-      (a) the 3D conditioning eqs. (44) and (45) for V_3D(t_0) and Sigma_3D(t_0);
-      (b) the temporal weight w_t = exp(-(t_0-v_0)^2 / (2 Sigma_tt))  [eq. 37].
-    Using (a)+sigma_k^2 however breaks the exact rank-1 property from Remark 20,
-    because c_world only encodes the "pure" spatial-temporal covariance
-    r(1+c) * J_embed * (sigma_ab, sigma_bb)^T  (eq. 43), which has no sigma_k^2
-    contribution.
-
-    We therefore split the two roles:
-      - sigma_tt_pure = r^2(1+c)^2 sigma_bb               (used for 3D conditioning, eqs. 44/45)
-      - sigma_tt_blur = sigma_tt_pure + sigma_k_temporal  (used for the temporal weight, eq. 37)
-    This preserves the rank-1 property exactly while keeping the temporal
-    fall-off well-behaved. The pixel-domain sigma_k (sigma_k_pixel) is applied
-    separately by the rasterizer as +sigma^2 I_2 on the 2D screen covariance.
+    Steps:
+      1. Project L_raw onto the 3-plane E_{n}:
+            L_plane = (I - n n^T) L_raw
+      2. Build the 4x4 PSD covariance:
+            Sigma_4D = L_plane @ L_plane^T
+      3. Block-decompose along time (axis 0):
+            sigma_tt_pure = Sigma_4D[..., 0, 0]
+            c_world       = Sigma_4D[..., 1:, 0]
+            Sigma_3D      = Sigma_4D[..., 1:, 1:]
+            v_0           = mu[..., 0]
+            V_k           = mu[..., 1:]
+      4. Sigma_tt (publicly exposed) = sigma_tt_pure + sigma_k_temporal,
+         used only for the temporal weight w_t.
+         The pure variance is stashed privately as `_sigma_tt_pure` so
+         condition_on_time can use it for the Schur complement (the
+         existing code does `getattr(derived, "_sigma_tt_pure", Sigma_tt)`).
     """
-    p = params.p()                                      # (N, 4)
-    q = params.q()                                      # (N, 4)
-    frame = G.canonical_frame(p, q)                     # c, d, s, r
+    n = params.n                                          # (N, 4) unit
+    L_raw = params.L_raw                                  # (N, 4, 3)
+    mu = params.mu                                        # (N, 4)
 
-    # Orthonormal basis of E_{p,q} as quaternions.
-    e1_hat, e2_hat = G.orthonormal_basis(p, q)          # (N, 4) each
+    # L_plane = (I - n n^T) L_raw = L_raw - n (n^T L_raw)
+    nL = torch.einsum("...i,...ij->...j", n, L_raw)       # (N, 3)
+    L_plane = L_raw - n.unsqueeze(-1) * nL.unsqueeze(-2)  # (N, 4, 3)
 
-    # Mean v in E_{p,q}: alpha_0 * e1_hat + beta_0 * e2_hat
-    alpha = params.alpha_0.unsqueeze(-1)                # (N, 1) for broadcasting
-    beta = params.beta_0.unsqueeze(-1)
-    v = alpha * e1_hat + beta * e2_hat                  # (N, 4)
+    # Sigma_4D = L_plane @ L_plane^T
+    Sigma_4D = L_plane @ L_plane.transpose(-1, -2)        # (N, 4, 4)
 
-    V_k = Q.imag(v)                                     # (N, 3) spatial mean
-    v_0 = Q.real(v)                                     # (N,)   temporal mean
+    sigma_tt_pure = Sigma_4D[..., 0, 0]                   # (N,)
+    c_world = Sigma_4D[..., 1:, 0]                        # (N, 3)
+    Sigma_3D = Sigma_4D[..., 1:, 1:]                      # (N, 3, 3)
 
-    # J_embed: 3x2 spatial embedding matrix.
-    J_e = Jac.jacobian_embed(p, q)                      # (N, 3, 2)
+    v_0 = mu[..., 0]                                      # (N,)
+    V_k = mu[..., 1:]                                     # (N, 3)
 
-    # Sigma_3D = J_embed @ Sigma_k @ J_embed^T  -> (N, 3, 3), rank <= 2.
-    Sigma_k = params.Sigma_k()                          # (N, 2, 2)
-    Sigma_3D = J_e @ Sigma_k @ J_e.transpose(-1, -2)    # (N, 3, 3)
-
-    # Pure temporal variance r^2 (1+c)^2 * sigma_bb  (for exact rank-1 on conditioning).
-    # r(1+c) = sqrt((1+c)/2), so r^2(1+c)^2 = (1+c)/2.
-    sigma_bb = Sigma_k[..., 1, 1]                       # (N,)
-    time_scale_sq = (1.0 + frame.c) * 0.5               # (N,)
-    sigma_tt_pure = time_scale_sq * sigma_bb            # (N,)
-    # Blurred temporal variance (for the unnormalized weight w_t). We ALSO use this
-    # as the "Sigma_tt" exposed publicly, for consistency with the paper's eq. (32).
-    Sigma_tt = sigma_tt_pure + params.sigma_k_temporal  # (N,)
-    # Stash the pure one privately for the conditioning step.
-    # We attach it as an extra field.
-
-    # c_world = r(1+c) * J_embed @ (sigma_ab, sigma_bb)^T     (eq. 43)
-    time_scale = torch.sqrt(time_scale_sq)              # (N,)
-    sigma_ab = Sigma_k[..., 0, 1]                       # (N,)
-    ab_bb = torch.stack([sigma_ab, sigma_bb], dim=-1)   # (N, 2)
-    c_world = time_scale.unsqueeze(-1) * (J_e @ ab_bb.unsqueeze(-1)).squeeze(-1)   # (N, 3)
+    # Public Sigma_tt (used by w_t) is blurred; private one (used by Schur) is pure.
+    Sigma_tt = sigma_tt_pure + params.sigma_k_temporal
 
     derived = DerivedQuantities(
         V_k=V_k,
@@ -179,8 +157,7 @@ def compute_derived(params: GaussianParams) -> DerivedQuantities:
         Sigma_tt=Sigma_tt,
         c_world=c_world,
     )
-    # Attach the pure variance for exact-rank conditioning.
-    derived._sigma_tt_pure = sigma_tt_pure   # type: ignore[attr-defined]
+    derived._sigma_tt_pure = sigma_tt_pure                # type: ignore[attr-defined]
     return derived
 
 
@@ -191,7 +168,8 @@ class TimeConditioned:
     """Per-frame conditioned quantities for rendering.
 
     V_3D_t:        (N, 3)     Time-conditioned 3D mean.
-    Sigma_3D_t:    (N, 3, 3)  Time-conditioned 3D covariance (rank 1 typically).
+    Sigma_3D_t:    (N, 3, 3)  Time-conditioned 3D covariance (rank <= 2 under
+                              the 3-plane parameterization -- a disk in 3D).
     alpha_eff:     (N,)       Time-modulated effective opacity.
     w_t:           (N,)       Unnormalized temporal weight (for debugging/culling).
     """
@@ -206,40 +184,32 @@ def condition_on_time(
     derived: DerivedQuantities,
     t_0: float,
 ) -> TimeConditioned:
-    """Per-frame conditioning at time t_0 (steps 6-8 of §9.2).
+    """Per-frame conditioning at time t_0 (Schur complement on the time axis).
 
-    Implements eqs. (44), (45), and (37):
-        V_3D(t_0)   = V_k + c_world * Sigma_tt_pure^{-1} * (t_0 - v_0)
-        Sigma_3D(t_0) = Sigma_3D - c_world c_world^T / Sigma_tt_pure
-        w_t = exp(-(t_0 - v_0)^2 / (2 Sigma_tt))   [UNNORMALIZED! cf. Remark 18]
-        alpha_eff = opacity * w_t
+        V_3D(t_0)    = V_k + c_world * (t_0 - v_0) / sigma_tt_pure
+        Sigma_3D(t_0) = Sigma_3D - c_world c_world^T / sigma_tt_pure
+        w_t           = exp(-(t_0 - v_0)^2 / (2 Sigma_tt))     [BLURRED]
+        alpha_eff     = opacity * w_t
 
-    NOTE: we use the PURE temporal variance (without sigma_k^2) for the 3D
-    conditioning so that the rank-1 property of Sigma_3D(t_0) from Remark 20
-    holds exactly. The BLURRED Sigma_tt (with sigma_k^2) is used only for the
-    temporal weight w_t, where it provides a well-behaved fall-off even when
-    sigma_bb -> 0. See the docstring of compute_derived for the rationale.
+    The "pure" sigma_tt_pure is used for the Schur (so Sigma_3D(t_0) is
+    exactly rank-2 under the projector parameterization). The "blurred"
+    Sigma_tt = sigma_tt_pure + sigma_k_temporal is used only for the
+    temporal weight w_t to keep the fall-off well-behaved when n is
+    near-aligned with the time axis (degenerate, sigma_tt_pure -> 0).
     """
     dt = t_0 - derived.v_0                                      # (N,)
 
-    # Use pure variance for 3D conditioning (exact rank drop).
     sigma_tt_pure = getattr(derived, "_sigma_tt_pure", derived.Sigma_tt)
-    # Guard against division by zero when sigma_bb == 0 (degenerate Gaussian,
-    # no temporal extent); in that case the conditioning is ill-defined and we
-    # fall back to "no shift, no shrinkage" (the Gaussian is a line at a fixed instant).
     eps = 1e-20
     inv_Stt_pure = 1.0 / sigma_tt_pure.clamp_min(eps)            # (N,)
 
-    # Mean shift: V_3D(t_0) = V_k + c_world * (dt / Sigma_tt_pure)
     shift = (dt * inv_Stt_pure).unsqueeze(-1) * derived.c_world  # (N, 3)
     V_3D_t = derived.V_k + shift                                 # (N, 3)
 
-    # Covariance shrinkage: Sigma_3D - (c_world c_world^T) / Sigma_tt_pure
     cw = derived.c_world                                         # (N, 3)
     outer = cw.unsqueeze(-1) * cw.unsqueeze(-2)                  # (N, 3, 3)
     Sigma_3D_t = derived.Sigma_3D - inv_Stt_pure.unsqueeze(-1).unsqueeze(-1) * outer
 
-    # UNNORMALIZED temporal weight (eq. 37). Uses the blurred Sigma_tt.
     inv_Stt_blur = 1.0 / derived.Sigma_tt.clamp_min(eps)
     w_t = torch.exp(-0.5 * dt * dt * inv_Stt_blur)               # (N,)
     alpha_eff = params.opacity * w_t                             # (N,)

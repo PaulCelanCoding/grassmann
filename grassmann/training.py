@@ -40,15 +40,17 @@ class TrainerConfig:
     num_iters: int = 2000
     batch_size_views: int = 1       # cameras per step (1 = pure stochastic)
     log_every: int = 100
-    renormalize_every: int = 1       # renormalize p_im, q_im onto S^2 (cheap; do every step)
+    renormalize_every: int = 1       # renormalize n_raw onto S^3 (cheap; do every step)
     lambda_l1: float = 0.8
     lambda_structural: float = 0.2
     lambda_lpips: float = 0.0
     use_lpips: bool = False           # requires lpips package + pretrained download
     lpips_net: str = "alex"           # 'alex' (fast) or 'vgg' (heavier)
-    # Learning rates (see trainable.build_optimizer)
-    lr_pq: float = 5e-3
-    lr_mean: float = 5e-3
+    # Learning rates (see trainable.build_optimizer). Names track the 3-plane
+    # parameterization: n is the unit-vector normal, mu is the R^4 mean,
+    # L is the 4x3 raw factor.
+    lr_n: float = 1e-3
+    lr_mu: float = 5e-3
     lr_L: float = 5e-3
     lr_opacity: float = 5e-2
     lr_color: float = 2e-2
@@ -109,8 +111,8 @@ class Trainer:
         # optimizer after density control changes the parameter set.
         self._build_opt = lambda m: build_optimizer(
             m,
-            lr_pq=self.config.lr_pq,
-            lr_mean=self.config.lr_mean,
+            lr_n=self.config.lr_n,
+            lr_mu=self.config.lr_mu,
             lr_L=self.config.lr_L,
             lr_opacity=self.config.lr_opacity,
             lr_color=self.config.lr_color,
@@ -151,13 +153,13 @@ class Trainer:
             frame = self.frame_data[cam_idx, t_idx]
         else:
             frame = self.frame_data(cam_idx, self.times[t_idx])
-        return frame.to(device=self.model.p_im.device)
+        return frame.to(device=self.model.n_raw.device)
 
     def render_one(self, cam_idx: int, t_value: float) -> Tensor:
         """Render the current model from camera cam_idx at time t_value."""
         params = self.model.forward()
         bg = self.config.background.to(dtype=params.color.dtype, device=params.color.device)
-        if self.config.use_fast_rasterizer and fast_available() and params.p_im.is_cuda:
+        if self.config.use_fast_rasterizer and fast_available() and params.n.is_cuda:
             fc = self.config.fast_raster_config or FastRasterConfig()
             return fast_rasterize(
                 params, t_value, self.cameras[cam_idx], self.H, self.W,
@@ -182,7 +184,7 @@ class Trainer:
         t_value = self.times[t_idx]
 
         # Target and rendered.
-        target = self.get_frame(cam_idx, t_idx).to(self.model.p_im.dtype)
+        target = self.get_frame(cam_idx, t_idx).to(self.model.n_raw.dtype)
         rendered = self.render_one(cam_idx, t_value)
 
         # Loss.
@@ -208,7 +210,7 @@ class Trainer:
         return loss.item(), l1_val
 
     def renormalize_manifolds(self) -> None:
-        """Re-project p_im, q_im onto S^2 (cheap maintenance step)."""
+        """Re-project n_raw onto S^3 (cheap maintenance step)."""
         self.model.renormalize_manifold_()
 
     def validate(self) -> dict[str, float]:
@@ -232,7 +234,7 @@ class Trainer:
                     )
                 for t_idx in frames:
                     t_value = self.times[t_idx]
-                    target = self.get_frame(t_idx, t_idx).to(self.model.p_im.dtype)
+                    target = self.get_frame(t_idx, t_idx).to(self.model.n_raw.dtype)
                     rendered = self.render_one(t_idx, t_value)
                     total_l1 += l1_loss(rendered, target).item()
                     count += 1
@@ -245,7 +247,7 @@ class Trainer:
                             t_frame_idx = self.times.index(t_value)
                         except ValueError:
                             continue
-                        target = self.get_frame(cam_idx, t_frame_idx).to(self.model.p_im.dtype)
+                        target = self.get_frame(cam_idx, t_frame_idx).to(self.model.n_raw.dtype)
                         rendered = self.render_one(cam_idx, t_value)
                         total_l1 += l1_loss(rendered, target).item()
                         count += 1

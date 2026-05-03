@@ -178,6 +178,13 @@ class FastRasterConfig:
     sh_degree: int = 0                # we use colors_precomp
     prefiltered: bool = False
     debug: bool = False
+    # Isotropic 3D regularizer added to Σ_3D(t_0) before packing into cov3D_precomp.
+    # Under the 3-plane (G(3,4)) projector parameterization, Σ_3D(t_0) is rank-2
+    # (a disk in 3D); the Inria CUDA EWA needs an invertible 3x3, so we add a tiny
+    # ε I to lift rank-2 → rank-3. 1e-4 ≈ (1cm)^2 in scene units when scenes are
+    # in meter-ish coordinates. Larger values become a meaningful blur, not just
+    # a numerical fix.
+    sigma_3d_blur: float = 1e-4
 
 
 def fast_rasterize(
@@ -189,6 +196,7 @@ def fast_rasterize(
     background: Optional[Tensor] = None,
     config: Optional[FastRasterConfig] = None,
     force_fallback: bool = False,
+    means2d_capture: Optional[list] = None,
 ) -> Tensor:
     """Render the current model using the CUDA 3DGS rasterizer if available,
     otherwise fall back to our toy rasterizer.
@@ -201,31 +209,38 @@ def fast_rasterize(
     config:     optional rasterizer settings.
     force_fallback: if True, always use the toy rasterizer (useful for testing
                     that the toy + fast paths agree).
+    means2d_capture: if a list is passed, the means2D dummy tensor (with
+                    requires_grad=True) is appended to it. After backward()
+                    its .grad gives the screen-space mean gradient per Gaussian
+                    — used by the screen-space density-control trigger.
+                    None entry is appended when the toy fallback path is taken.
 
     Returns: (H, W, 3) rendered image.
     """
     if config is None:
         config = FastRasterConfig()
     if background is None:
-        background = torch.zeros(3, dtype=params.p_im.dtype, device=params.p_im.device)
+        background = torch.zeros(3, dtype=params.n.dtype, device=params.n.device)
 
     # Always compute the derived + time-conditioned quantities.
     derived = compute_derived(params)
     tc = condition_on_time(params, derived, t_0)
 
-    use_fast = (not force_fallback) and is_available() and params.p_im.is_cuda
+    use_fast = (not force_fallback) and is_available() and params.n.is_cuda
 
     if not use_fast:
         sg = project_to_screen(params, tc, cam)
-        bg = background.to(dtype=params.p_im.dtype, device=params.p_im.device)
+        bg = background.to(dtype=params.n.dtype, device=params.n.device)
+        if means2d_capture is not None:
+            means2d_capture.append(None)   # toy path has no means2D analog
         return toy_rasterize(sg, H=H, W=W, background=bg)
 
     # ---- Fast CUDA path ----
     assert _GaussianRasterizationSettings is not None
     assert _GaussianRasterizer is not None
 
-    dtype = params.p_im.dtype
-    device = params.p_im.device
+    dtype = params.n.dtype
+    device = params.n.device
 
     # Move camera tensors to the same device/dtype.
     cam_dev = Camera(
@@ -263,7 +278,11 @@ def fast_rasterize(
     means2D = torch.zeros_like(means3D, requires_grad=True)
     colors_precomp = params.color                                # (N, 3) in [0, 1]
     opacities = tc.alpha_eff.unsqueeze(-1)                       # (N, 1)
-    cov3D_precomp = sigma3d_to_cov6(tc.Sigma_3D_t)               # (N, 6)
+    sigma_3d_t = tc.Sigma_3D_t
+    if config.sigma_3d_blur > 0.0:
+        eye = torch.eye(3, dtype=sigma_3d_t.dtype, device=sigma_3d_t.device)
+        sigma_3d_t = sigma_3d_t + (config.sigma_3d_blur ** 2) * eye
+    cov3D_precomp = sigma3d_to_cov6(sigma_3d_t)                  # (N, 6)
 
     # Call the CUDA kernel.
     rendered_image, radii = rasterizer(

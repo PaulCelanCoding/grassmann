@@ -1,11 +1,11 @@
 """
-Local entrypoint for monocular training (NeRFies / DyCheck).
+Local entrypoint for monocular training (NeRFies / DyCheck) under the 3-plane
+projector parameterization (Phase A).
 
 Usage (from repo root):
   python scripts/train_mono.py \
       --dataset nerfies \
       --scene_dir data/nerfies/<scene> \
-      --init_strategy median \
       --num_iters 5000 \
       --output_dir checkpoints/<scene>
 
@@ -13,9 +13,9 @@ Loads a MonocularDataset, initializes the per-frame Gaussian model from the
 scene's point cloud + observability, and runs the standard Trainer in
 monocular sampling mode.
 
-This script is dataset-format-agnostic at the call-site level: it dispatches
-to grassmann.datasets.{nerfies,dycheck} based on `--dataset`. Both loaders
-return the same MonocularDataset contract.
+Density control is disabled by default (Phase A: --densify_every defaults
+to 0 because the legacy DC targeted the 2-plane param and is incompatible
+with the new param; see the plan for Phase C re-introduction).
 """
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ import torch
 
 from grassmann.datasets.dycheck import load_dycheck
 from grassmann.datasets.nerfies import load_nerfies
-from grassmann.density_control import DensityConfig
+from grassmann.fast_rasterizer import FastRasterConfig
 from grassmann.initialization import init_gaussians_from_points
 from grassmann.trainable import trainable_from_params
 from grassmann.training import Trainer, TrainerConfig
@@ -69,18 +69,43 @@ def main():
     ap.add_argument("--image_scale", type=int, default=4)
     ap.add_argument("--split", type=str, default=None,
                     help="DyCheck split name (e.g. 'train', 'common'). Ignored for nerfies.")
-    ap.add_argument("--init_strategy", choices=("lookat", "birth", "median", "random"),
-                    default="median",
-                    help="How to pick the per-point ref camera at init.")
+    ap.add_argument("--init_strategy",
+                    choices=("random",),
+                    default="random",
+                    help="Phase A only exposes 'random' (n ~ Uniform(S^3); L_raw ~ small "
+                         "isotropic Gaussian). Ray-aware strategies will be re-introduced "
+                         "in Phase B with semantically corrected geometry.")
     ap.add_argument("--num_iters", type=int, default=5000)
     ap.add_argument("--log_every", type=int, default=200)
     ap.add_argument("--use_fast_rasterizer", action="store_true")
+    ap.add_argument("--sigma_3d_blur", type=float, default=1e-4,
+                    help="Isotropic numerical lift (ε I) added to Σ_3D(t_0) before "
+                         "feeding to the CUDA rasterizer. Σ_3D(t_0) is rank-2 under the "
+                         "3-plane parameterization; the EWA needs an invertible 3x3, so "
+                         "ε≈1e-4 (about 1cm² in scene units) is enough. Larger values "
+                         "become a meaningful blur.")
+    ap.add_argument("--sigma_init_sq", type=float, default=0.02,
+                    help="In-plane init covariance scale σ²_init. L_raw entries ~ "
+                         "N(0, σ²_init / 3) so E[L_raw L_raw^T] ≈ σ²_init · I_4. "
+                         "After projection and Schur on time, Σ_3D(t_0) has eigenvalues "
+                         "~ σ²_init in two of its three directions (the disk).")
     ap.add_argument("--device", type=str, default=None,
                     help="cpu | cuda. Defaults to cuda if available.")
     ap.add_argument("--allow_distortion", action="store_true",
                     help="Treat scenes with non-zero radial/tangential distortion "
                          "as pinhole. Geometry is approximate -- smoke runs only.")
+    ap.add_argument("--densify_every", type=int, default=0,
+                    help="Density-control event frequency. 0 disables density control. "
+                         "Phase A: must be 0 (DC targets the legacy 2-plane param).")
+    ap.add_argument("--seed", type=int, default=None,
+                    help="Optional seed for the random initialization (n, L_raw).")
     args = ap.parse_args()
+
+    if args.densify_every != 0:
+        raise SystemExit(
+            "Phase A: --densify_every must be 0; legacy DC is incompatible with the "
+            "3-plane projector parameterization. See Phase C in the plan."
+        )
 
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Loading {args.dataset} scene from {args.scene_dir} (image_scale={args.image_scale})")
@@ -110,10 +135,11 @@ def main():
         ds.cameras_per_frame,
         strategy=args.init_strategy,
         observability=ds.observability,
-        sigma_aa=0.02, sigma_bb=0.05, sigma_ab=0.0,
+        sigma_init_sq=args.sigma_init_sq,
         opacity=0.5,
         sigma_k_pixel=1.0,
         sigma_k_temporal=0.0,
+        seed=args.seed,
     )
     model = trainable_from_params(params, dtype=DTYPE, device=device)
     print(f"  Model: {model.N} Gaussians on {device}")
@@ -123,22 +149,12 @@ def main():
         log_every=args.log_every,
         lambda_l1=0.8,
         lambda_structural=0.2,
-        lr_pq=1e-3, lr_mean=5e-3, lr_L=5e-3,
+        lr_n=1e-3, lr_mu=5e-3, lr_L=5e-3,
         lr_opacity=5e-2, lr_color=5e-2,
         background=torch.zeros(3, dtype=DTYPE, device=device),
-        # Density schedule mirrors standard 3DGS: dense events from 10% of the
-        # run through the end of the warm-up half, every 100 iters. With
-        # num_iters=5000 this gives ~25 events; with 30000 it gives ~145.
-        densify_every=100,
-        densify_start=max(args.num_iters // 10, 200),
-        densify_stop=max(args.num_iters // 2, 2000),
-        density_config=DensityConfig(
-            opacity_threshold=0.001,
-            scale_min=1e-5, scale_max=2.0,
-            grad_threshold=2e-4,
-            clone_scale_threshold=0.05,
-        ),
+        densify_every=args.densify_every,
         use_fast_rasterizer=args.use_fast_rasterizer,
+        fast_raster_config=FastRasterConfig(sigma_3d_blur=args.sigma_3d_blur),
         validation_every=max(args.log_every, args.num_iters // 10),
     )
     trainer = Trainer.from_monocular_dataset(model, ds, config)

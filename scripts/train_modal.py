@@ -1,5 +1,5 @@
 """
-Modal entry for monocular GPU training on L4.
+Modal entry for monocular GPU training on L4 (Phase A: 3-plane projector).
 
 Volumes (created on first run):
   gs-mono         /data          NeRFies / DyCheck scenes
@@ -14,12 +14,14 @@ Usage:
   modal run scripts/train_modal.py --cmd smoke --dataset nerfies --scene <scene>
   modal run scripts/train_modal.py --cmd train --dataset nerfies --scene <scene> --iters 30000
   modal run scripts/train_modal.py --cmd train --dataset dycheck --scene <scene> --split train
+  modal run scripts/train_modal.py --cmd render --dataset nerfies --scene <scene> \
+      --ckpt nerfies-slice-banana-random-30000it/trained_nerfies_random.pt \
+      --frames 0,50,100 --side-by-side
 
-Smoke = train with --num_iters 100 --image_scale 4 to validate the
-entire Modal + CUDA + data path before committing GPU-hours to a real run.
-
-The legacy N3DV/multi-camera training scripts (incl. the single-Gaussian
-sanity check) live under legacy/multi_camera/scripts/.
+Density control is disabled in Phase A (the legacy DC targets the 2-plane
+parameterization; see the plan, Phase C, for re-introduction). The
+`init_strategy` and `sigma_3d_blur` flags are the only meaningful knobs
+exposed here.
 """
 import subprocess
 from pathlib import Path
@@ -114,9 +116,14 @@ def train(
     split: str | None,
     allow_distortion: bool,
     log_every: int,
+    sigma_3d_blur: float,
+    sigma_init_sq: float,
+    run_tag: str,
+    seed: int | None,
 ) -> None:
     scene_dir = _ensure_scene_unpacked(scene)
-    out_dir = f"/checkpoints/{dataset}-{scene}-{init_strategy}-{num_iters}it"
+    suffix = f"-{run_tag}" if run_tag else ""
+    out_dir = f"/checkpoints/{dataset}-{scene}-{init_strategy}-{num_iters}it{suffix}"
     argv = [
         "python", "scripts/train_mono.py",
         "--dataset", dataset,
@@ -126,6 +133,8 @@ def train(
         "--log_every", str(log_every),
         "--image_scale", str(image_scale),
         "--init_strategy", init_strategy,
+        "--sigma_3d_blur", str(sigma_3d_blur),
+        "--sigma_init_sq", str(sigma_init_sq),
     ]
     if split is not None:
         argv += ["--split", split]
@@ -133,8 +142,51 @@ def train(
         argv.append("--use_fast_rasterizer")
     if allow_distortion:
         argv.append("--allow_distortion")
+    if seed is not None:
+        argv += ["--seed", str(seed)]
     _run(argv)
     ckpt_vol.commit()
+
+
+@app.function(gpu=GPU, volumes=VOLUMES, timeout=2 * 3600)
+def render(
+    dataset: str,
+    scene: str,
+    ckpt: str,
+    frames: str,
+    image_scale: int,
+    split: str | None,
+    allow_distortion: bool,
+    side_by_side: bool,
+    sigma_3d_blur: float,
+) -> None:
+    import os
+    scene_dir = _ensure_scene_unpacked(scene)
+    ckpt_path = f"/checkpoints/{ckpt}"
+    if not os.path.isfile(ckpt_path):
+        raise FileNotFoundError(f"{ckpt_path!r} not found on gs-checkpoints volume.")
+    out_dir = os.path.join(os.path.dirname(ckpt_path), "renders")
+    argv = [
+        "python", "scripts/render_mono.py",
+        "--dataset", dataset,
+        "--scene_dir", scene_dir,
+        "--ckpt", ckpt_path,
+        "--frames", frames,
+        "--output_dir", out_dir,
+        "--image_scale", str(image_scale),
+        "--device", "cuda",
+        "--sigma_3d_blur", str(sigma_3d_blur),
+    ]
+    if split is not None:
+        argv += ["--split", split]
+    if allow_distortion:
+        argv.append("--allow_distortion")
+    if side_by_side:
+        argv.append("--side_by_side")
+    _run(argv)
+    ckpt_vol.commit()
+    rel = os.path.relpath(out_dir, "/checkpoints")
+    print(f"\nPull renders locally:\n  modal volume get gs-checkpoints {rel} ./renders", flush=True)
 
 
 @app.local_entrypoint()
@@ -144,16 +196,26 @@ def main(
     scene: str = "slice-banana",
     iters: int = 500,
     log_every: int = 50,
-    init_strategy: str = "median",
+    init_strategy: str = "random",
     split: str = "",
-    allow_distortion: bool = True,  # default True: every shipped scene has it
+    allow_distortion: bool = True,
+    ckpt: str = "",
+    frames: str = "0",
+    image_scale: int = 4,
+    side_by_side: bool = False,
+    sigma_3d_blur: float = 1e-4,
+    sigma_init_sq: float = 0.02,
+    run_tag: str = "",
+    seed: int = -1,
 ):
     """
-    --cmd smoke: short run (--iters used; default 500) at scale 4. Validates
-                 code path AND prints per-log_every loss to confirm convergence.
-    --cmd train: full run at scale 2.
+    --cmd smoke:  short run (--iters used; default 500) at scale 4. Validates
+                  code path AND prints per-log_every loss to confirm convergence.
+    --cmd train:  full run at scale 2 (default --iters 30000).
+    --cmd render: load --ckpt (path under /checkpoints), render --frames via CUDA.
     """
     split_arg = split or None
+    seed_arg = None if seed < 0 else seed
     if cmd == "smoke":
         train.remote(
             dataset=dataset, scene=scene,
@@ -161,15 +223,33 @@ def main(
             init_strategy=init_strategy, split=split_arg,
             allow_distortion=allow_distortion,
             log_every=log_every,
+            sigma_3d_blur=sigma_3d_blur,
+            sigma_init_sq=sigma_init_sq,
+            run_tag=run_tag,
+            seed=seed_arg,
         )
     elif cmd == "train":
         train.remote(
             dataset=dataset, scene=scene,
-            num_iters=iters if iters != 500 else 30000,  # default to 30k for full train
+            num_iters=iters if iters != 500 else 30000,
             image_scale=2, use_fast=True,
             init_strategy=init_strategy, split=split_arg,
             allow_distortion=allow_distortion,
-            log_every=log_every if log_every != 50 else 200,  # default 200 for full train
+            log_every=log_every if log_every != 50 else 200,
+            sigma_3d_blur=sigma_3d_blur,
+            sigma_init_sq=sigma_init_sq,
+            run_tag=run_tag,
+            seed=seed_arg,
+        )
+    elif cmd == "render":
+        if not ckpt:
+            raise SystemExit("--cmd render requires --ckpt <path-under-/checkpoints>")
+        render.remote(
+            dataset=dataset, scene=scene,
+            ckpt=ckpt, frames=frames, image_scale=image_scale,
+            split=split_arg, allow_distortion=allow_distortion,
+            side_by_side=side_by_side,
+            sigma_3d_blur=sigma_3d_blur,
         )
     else:
-        raise SystemExit(f"unknown --cmd {cmd!r}; expected smoke|train")
+        raise SystemExit(f"unknown --cmd {cmd!r}; expected smoke|train|render")
