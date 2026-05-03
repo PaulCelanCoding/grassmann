@@ -14,6 +14,13 @@ Produces:
   - phase4_triangulation.png: scatter plot of true vs triangulated 3D points.
   - phase4_timelapse.png: GT vs reconstructed videos side-by-side over time.
 """
+import sys
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 import matplotlib.pyplot as plt
 import numpy as np
 import torch

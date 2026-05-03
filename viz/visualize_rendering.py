@@ -17,6 +17,13 @@ Demo 4: A small multi-Gaussian "scene" with three differently colored splats.
 
 Images are saved in /home/claude/grassmann/ and can be opened as PNGs.
 """
+import sys
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 import matplotlib.pyplot as plt
 import numpy as np
 import torch

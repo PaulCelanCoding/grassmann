@@ -3,6 +3,13 @@
 A simple diagram showing the two rendering paths and how the adapter routes
 between them. Generated as an HTML artifact via matplotlib's text rendering.
 """
+import sys
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 import matplotlib.pyplot as plt
 from matplotlib.patches import FancyBboxPatch, FancyArrowPatch
 from matplotlib.lines import Line2D

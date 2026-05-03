@@ -3,6 +3,13 @@
 Not a unit test per se -- produces a summary of worst-case errors across a fuzzing run.
 Useful to run occasionally to catch numerical cliffs.
 """
+import sys
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 import torch
 
 from grassmann import quaternion as Q

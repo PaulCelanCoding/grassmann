@@ -8,6 +8,13 @@ Two experiments:
   Demo B: Multi-view multi-frame training. 3 cameras on a ring, 5 frames.
           Show loss curve and GT-vs-rendered grid (at a validation time/cam).
 """
+import sys
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 import matplotlib.pyplot as plt
 import numpy as np
 import torch

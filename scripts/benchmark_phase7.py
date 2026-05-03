@@ -18,7 +18,14 @@ What it does:
 Typical expected result: the CUDA path is 100-500x faster than the toy
 rasterizer for thousands of Gaussians at modest resolution.
 """
+import sys
 import time
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 import torch
 
 from grassmann import quaternion as Q

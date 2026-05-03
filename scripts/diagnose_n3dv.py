@@ -11,7 +11,16 @@ and what fraction of Gaussians are visible (have non-trivial opacity).
 """
 import argparse
 import json
+import sys
 from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+# scripts/ also needs to be importable for the `from train_n3dv import ...` line below.
+_SCRIPTS_DIR = _REPO_ROOT / "scripts"
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
 
 import numpy as np
 import torch

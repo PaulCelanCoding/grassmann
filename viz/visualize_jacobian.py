@@ -9,6 +9,13 @@ We take a Gaussian mean v in E_{p,q} and visualize:
 
 Output: a PNG with two panels.
 """
+import sys
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 import matplotlib.pyplot as plt
 import numpy as np
 import torch

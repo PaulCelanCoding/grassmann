@@ -37,7 +37,14 @@ GPU memory: at full resolution (1352x1014) with thousands of Gaussians, expect
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
+
+# Allow `python scripts/train_n3dv.py ...` from the repo root without installing
+# the grassmann package. Mirrors what Modal does via add_local_python_source.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 import numpy as np
 import torch

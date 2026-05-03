@@ -19,7 +19,16 @@ Run from your grassmann/ directory:
     python scripts/sanity_one_gaussian.py --scene_dir data/n3dv/flame_steak/
 """
 import argparse
+import sys
 from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+# scripts/ also needs to be importable for the `from train_n3dv import ...` line.
+_SCRIPTS_DIR = _REPO_ROOT / "scripts"
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
 
 import numpy as np
 import torch

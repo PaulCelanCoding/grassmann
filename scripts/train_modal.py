@@ -1,22 +1,26 @@
 """
-Modal entry for GPU training/diagnostics on L4.
+Modal entry for monocular GPU training on L4.
 
 Volumes (created on first run):
-  gs-n3dv         /data          N3DV scenes (cam??/, cameras.json, points3D.txt)
+  gs-mono         /data          NeRFies / DyCheck scenes
   gs-checkpoints  /checkpoints   per-run output
 
 One-time data upload (from repo root):
-  modal volume create gs-n3dv
-  modal volume put gs-n3dv ./data/n3dv/flame_steak /flame_steak
+  modal volume create gs-mono
+  modal volume put gs-mono ./data/nerfies/<scene>  /<scene>
+  modal volume put gs-mono ./data/dycheck/<scene>  /<scene>
 
 Usage:
-  modal run scripts/train_modal.py --cmd smoke
-  modal run scripts/train_modal.py --cmd train --iters 30000
-  modal run scripts/train_modal.py --cmd diagnose
-  modal run scripts/train_modal.py --cmd sanity
+  modal run scripts/train_modal.py --cmd smoke   --dataset nerfies --scene <scene>
+  modal run scripts/train_modal.py --cmd train   --dataset nerfies --scene <scene> --iters 30000
+  modal run scripts/train_modal.py --cmd train   --dataset dycheck --scene <scene> --split train
+  modal run scripts/train_modal.py --cmd sanity  --scene <scene>
 
-Smoke = train with --num_iters 100 --downscale_factor 4 to validate the
+Smoke = train with --num_iters 100 --image_scale 4 to validate the
 entire Modal + CUDA + data path before committing GPU-hours to a real run.
+
+The legacy N3DV/multi-camera entrypoint lives at
+legacy/multi_camera/scripts/train_modal_n3dv.py (volume: gs-n3dv).
 """
 import subprocess
 from pathlib import Path
@@ -48,10 +52,10 @@ image = (
 
 app = modal.App("grassmann-train", image=image)
 
-n3dv_vol = modal.Volume.from_name("gs-n3dv", create_if_missing=True)
+mono_vol = modal.Volume.from_name("gs-mono", create_if_missing=True)
 ckpt_vol = modal.Volume.from_name("gs-checkpoints", create_if_missing=True)
 
-VOLUMES = {"/data": n3dv_vol, "/checkpoints": ckpt_vol}
+VOLUMES = {"/data": mono_vol, "/checkpoints": ckpt_vol}
 GPU = "L4"
 
 
@@ -61,16 +65,28 @@ def _run(argv: list[str]) -> None:
 
 
 @app.function(gpu=GPU, volumes=VOLUMES, timeout=24 * 3600)
-def train(scene: str, num_iters: int, downscale: int, use_fast: bool) -> None:
+def train(
+    dataset: str,
+    scene: str,
+    num_iters: int,
+    image_scale: int,
+    use_fast: bool,
+    init_strategy: str,
+    split: str | None,
+) -> None:
     scene_dir = f"/data/{scene}"
-    out_dir = f"/checkpoints/{scene}-{num_iters}it"
+    out_dir = f"/checkpoints/{dataset}-{scene}-{init_strategy}-{num_iters}it"
     argv = [
-        "python", "scripts/train_n3dv.py", "train",
+        "python", "scripts/train_mono.py",
+        "--dataset", dataset,
         "--scene_dir", scene_dir,
         "--output_dir", out_dir,
         "--num_iters", str(num_iters),
-        "--downscale_factor", str(downscale),
+        "--image_scale", str(image_scale),
+        "--init_strategy", init_strategy,
     ]
+    if split is not None:
+        argv += ["--split", split]
     if use_fast:
         argv.append("--use_fast_rasterizer")
     _run(argv)
@@ -78,16 +94,9 @@ def train(scene: str, num_iters: int, downscale: int, use_fast: bool) -> None:
 
 
 @app.function(gpu=GPU, volumes=VOLUMES, timeout=3600)
-def diagnose(scene: str) -> None:
-    _run([
-        "python", "scripts/diagnose_n3dv.py",
-        "--scene_dir", f"/data/{scene}",
-    ])
-    ckpt_vol.commit()
-
-
-@app.function(gpu=GPU, volumes=VOLUMES, timeout=3600)
 def sanity(scene: str) -> None:
+    """Single-Gaussian sanity render. Currently uses the multi-camera
+    sanity script; will be ported to the monocular path in a follow-up."""
     _run([
         "python", "scripts/sanity_one_gaussian.py",
         "--scene_dir", f"/data/{scene}",
@@ -98,16 +107,26 @@ def sanity(scene: str) -> None:
 @app.local_entrypoint()
 def main(
     cmd: str = "smoke",
-    scene: str = "flame_steak",
+    dataset: str = "nerfies",
+    scene: str = "broom2",
     iters: int = 30000,
+    init_strategy: str = "median",
+    split: str = "",
 ):
+    split_arg = split or None
     if cmd == "smoke":
-        train.remote(scene=scene, num_iters=100, downscale=4, use_fast=True)
+        train.remote(
+            dataset=dataset, scene=scene,
+            num_iters=100, image_scale=4, use_fast=True,
+            init_strategy=init_strategy, split=split_arg,
+        )
     elif cmd == "train":
-        train.remote(scene=scene, num_iters=iters, downscale=1, use_fast=True)
-    elif cmd == "diagnose":
-        diagnose.remote(scene=scene)
+        train.remote(
+            dataset=dataset, scene=scene,
+            num_iters=iters, image_scale=2, use_fast=True,
+            init_strategy=init_strategy, split=split_arg,
+        )
     elif cmd == "sanity":
         sanity.remote(scene=scene)
     else:
-        raise SystemExit(f"unknown --cmd {cmd!r}; expected smoke|train|diagnose|sanity")
+        raise SystemExit(f"unknown --cmd {cmd!r}; expected smoke|train|sanity")
