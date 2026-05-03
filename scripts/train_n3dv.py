@@ -125,9 +125,10 @@ class N3DVFrameLoader:
         self._cache_capacity = 64
 
     def __call__(self, cam_idx: int, t_value: float) -> torch.Tensor:
-        # t_value is a frame index expressed as a float (we use float times in
-        # the Trainer; for N3DV they map 1:1 to frame indices).
-        t_idx = int(round(t_value))
+        # t_value is a normalized time in [0, 1] (RCA Bug C: see
+        # grassmann/time_normalization.py). Map back to a frame index for disk lookup.
+        t_idx = int(round(float(t_value) * (self.n_frames - 1))) if self.n_frames > 1 else 0
+        t_idx = max(0, min(t_idx, self.n_frames - 1))
         key = (cam_idx, t_idx)
         if key in self._cache:
             return self._cache[key]
@@ -208,7 +209,12 @@ def train(args):
     # `sigma_aa` should be ~ (NN distance)^2 for a Gaussian with std-dev = NN dist.
     # But this is a per-Gaussian value; init_gaussians_from_points takes a scalar.
     # We need to call it ONCE PER GAUSSIAN — slow but only at init.
-    times_init = torch.linspace(0.0, float(args.n_frames - 1), points.shape[0], dtype=torch.float64)
+    # Times are normalized to [0, 1] (RCA Bug C fix). With normalized times, the
+    # default sigma_bb=0.05 gives ~16% of the timeline as the temporal std-dev,
+    # which is well-resolved -- no need for the legacy sigma_k_temporal=20 workaround.
+    from grassmann.time_normalization import normalize_times
+    times_norm = normalize_times(range(args.n_frames))
+    times_init = torch.linspace(0.0, 1.0, points.shape[0], dtype=torch.float64)
 
     from grassmann.initialization import init_gaussian_from_point
     print("Initializing per-point Gaussians (this may take a minute)...")
@@ -222,8 +228,8 @@ def train(args):
             sigma_bb=0.05,
             sigma_ab=0.0,
             opacity=0.3,
-            sigma_k_pixel=20.0,
-            sigma_k_temporal=20.0,
+            sigma_k_pixel=1.0,
+            sigma_k_temporal=0.0,
         )
         all_params.append(g)
 
@@ -237,13 +243,13 @@ def train(args):
         L=torch.cat([g.L for g in all_params]),
         opacity=torch.cat([g.opacity for g in all_params]),
         color=torch.cat([g.color for g in all_params]),
-        sigma_k_pixel=20.0,
-        sigma_k_temporal=20.0,
+        sigma_k_pixel=1.0,
+        sigma_k_temporal=0.0,
     )
     print(f"Built {params_init.p_im.shape[0]} Gaussians with per-point scales")
 
 
-    times = list(range(args.n_frames))
+    times = times_norm.tolist()
 
     model = trainable_from_params(params_init, dtype=DTYPE, device=DEVICE)
     print(f"Model on {DEVICE}, {model.N} Gaussians")

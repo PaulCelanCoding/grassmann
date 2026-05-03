@@ -79,10 +79,8 @@ def main():
     print(f"  per-point NN dist: mean={nn_dist.mean():.3f}, "
         f"min={nn_dist.min():.3f}, max={nn_dist.max():.3f}")
 
-    # `sigma_aa` should be ~ (NN distance)^2 for a Gaussian with std-dev = NN dist.
-    # But this is a per-Gaussian value; init_gaussians_from_points takes a scalar.
-    # We need to call it ONCE PER GAUSSIAN — slow but only at init.
-    times_init = torch.linspace(0.0, float(args.n_frames - 1), points.shape[0], dtype=torch.float64)
+    # Times are normalized to [0, 1] (RCA Bug C); see grassmann/time_normalization.py.
+    times_init = torch.linspace(0.0, 1.0, points.shape[0], dtype=torch.float64)
 
     from grassmann.initialization import init_gaussian_from_point
     print("Initializing per-point Gaussians (this may take a minute)...")
@@ -96,8 +94,8 @@ def main():
             sigma_bb=0.05,
             sigma_ab=0.0,
             opacity=0.3,
-            sigma_k_pixel=20.0,
-            sigma_k_temporal=20.0,
+            sigma_k_pixel=1.0,
+            sigma_k_temporal=0.0,
         )
         all_params.append(g)
 
@@ -111,8 +109,8 @@ def main():
         L=torch.cat([g.L for g in all_params]),
         opacity=torch.cat([g.opacity for g in all_params]),
         color=torch.cat([g.color for g in all_params]),
-        sigma_k_pixel=20.0,
-        sigma_k_temporal=20.0,
+        sigma_k_pixel=1.0,
+        sigma_k_temporal=0.0,
     )
     print(f"Built {params_init.p_im.shape[0]} Gaussians with per-point scales")
 
@@ -147,7 +145,10 @@ def main():
     optimizer = build_optimizer(model, lr_pq=1e-3, lr_mean=5e-3, lr_L=5e-3,
                                  lr_opacity=5e-2, lr_color=5e-2)
 
-    times_list = list(range(args.n_frames))
+    # Times normalized to [0, 1] (RCA Bug C); the loader converts back to a frame
+    # index internally.
+    from grassmann.time_normalization import normalize_times
+    times_list = normalize_times(range(args.n_frames)).tolist()
     for it in range(1, args.num_iters + 1):
         cam_idx = torch.randint(0, len(cameras), (1,)).item()
         t_idx = torch.randint(0, args.n_frames, (1,)).item()
