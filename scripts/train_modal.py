@@ -63,6 +63,46 @@ def _run(argv: list[str]) -> None:
     subprocess.run(argv, check=True, cwd="/root")
 
 
+def _ensure_scene_unpacked(scene: str) -> str:
+    """Ensure /data/<scene> exists. If not, unzip /data/<scene>.zip onto the volume.
+
+    Workaround for `modal volume put` being painfully slow when uploading many
+    small files (we observed ~30+ min for 1500 files vs ~5 min for one zip).
+    Standard NeRFies/HyperNeRF/DyCheck scenes have ~330 frames * (4 RGB scales
+    + camera JSON + ...) -> easily into the thousands.
+
+    Upload pattern:
+        modal volume put gs-mono ./data/<dataset>/<scene>.zip /<scene>.zip
+    """
+    import os
+    import zipfile
+
+    scene_dir = f"/data/{scene}"
+    if os.path.isdir(scene_dir):
+        return scene_dir
+    zip_path = f"/data/{scene}.zip"
+    if not os.path.isfile(zip_path):
+        raise FileNotFoundError(
+            f"Neither {scene_dir!r} (dir) nor {zip_path!r} (zip) exist on the gs-mono "
+            f"volume. Upload one of them first."
+        )
+    print(f"  unpacking {zip_path} -> /data/...", flush=True)
+    with zipfile.ZipFile(zip_path) as zf:
+        zf.extractall("/data")
+    if not os.path.isdir(scene_dir):
+        # The zip's top-level dir name didn't match `scene`. Try to detect it.
+        for entry in os.listdir("/data"):
+            candidate = f"/data/{entry}"
+            if os.path.isdir(candidate) and os.path.exists(f"{candidate}/dataset.json"):
+                if entry != scene:
+                    print(f"  [info] zip top-level was {entry!r}, not {scene!r}; "
+                          f"using {candidate}", flush=True)
+                return candidate
+        raise RuntimeError(f"Unzipped {zip_path} but no scene dir found under /data/.")
+    mono_vol.commit()
+    return scene_dir
+
+
 @app.function(gpu=GPU, volumes=VOLUMES, timeout=24 * 3600)
 def train(
     dataset: str,
@@ -74,7 +114,7 @@ def train(
     split: str | None,
     allow_distortion: bool,
 ) -> None:
-    scene_dir = f"/data/{scene}"
+    scene_dir = _ensure_scene_unpacked(scene)
     out_dir = f"/checkpoints/{dataset}-{scene}-{init_strategy}-{num_iters}it"
     argv = [
         "python", "scripts/train_mono.py",

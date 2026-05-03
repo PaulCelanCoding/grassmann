@@ -14,7 +14,7 @@ We are implementing docs/maths/. This works with monocular video data.
 - `legacy/multi_camera/` — archived N3DV/multi-cam stack (unsupported)
 
 ## GPU training (Modal, L4)
-`modal run scripts/train_modal.py --cmd smoke --dataset nerfies --scene <scene>` (or `train|sanity`); preload data via `modal volume put gs-mono ./data/nerfies/<scene> /<scene>`.
+`modal run scripts/train_modal.py --cmd smoke --dataset nerfies --scene <scene>` (or `train`); preload data via `modal volume put gs-mono ./data/nerfies/<scene> /<scene>`.
 
 ## THE FOLLOWING RULES ARE NON NEGIOTABLE AND ABSOLUTELY MISSION CRITICAL
 - Keine `Enhanced`/`Advanced`-Varianten — Legacy-Klassen direkt updaten
