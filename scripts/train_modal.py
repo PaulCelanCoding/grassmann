@@ -72,6 +72,7 @@ def train(
     use_fast: bool,
     init_strategy: str,
     split: str | None,
+    allow_distortion: bool,
 ) -> None:
     scene_dir = f"/data/{scene}"
     out_dir = f"/checkpoints/{dataset}-{scene}-{init_strategy}-{num_iters}it"
@@ -88,6 +89,8 @@ def train(
         argv += ["--split", split]
     if use_fast:
         argv.append("--use_fast_rasterizer")
+    if allow_distortion:
+        argv.append("--allow_distortion")
     _run(argv)
     ckpt_vol.commit()
 
@@ -96,10 +99,11 @@ def train(
 def main(
     cmd: str = "smoke",
     dataset: str = "nerfies",
-    scene: str = "broom2",
+    scene: str = "slice-banana",
     iters: int = 30000,
     init_strategy: str = "median",
     split: str = "",
+    allow_distortion: bool = True,  # default True: every shipped scene has it
 ):
     split_arg = split or None
     if cmd == "smoke":
@@ -107,12 +111,14 @@ def main(
             dataset=dataset, scene=scene,
             num_iters=100, image_scale=4, use_fast=True,
             init_strategy=init_strategy, split=split_arg,
+            allow_distortion=allow_distortion,
         )
     elif cmd == "train":
         train.remote(
             dataset=dataset, scene=scene,
             num_iters=iters, image_scale=2, use_fast=True,
             init_strategy=init_strategy, split=split_arg,
+            allow_distortion=allow_distortion,
         )
     else:
         raise SystemExit(f"unknown --cmd {cmd!r}; expected smoke|train")

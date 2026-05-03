@@ -38,20 +38,24 @@ def load_dycheck(
     *,
     image_scale: int = 4,
     split_name: Optional[str] = None,
+    allow_distortion: bool = False,
 ) -> MonocularDataset:
     """Load a DyCheck iPhone scene.
 
-    scene_dir:   path to the scene directory.
-    image_scale: which `rgb/${image_scale}x/` subdirectory to read frames from.
-    split_name:  if given, override dataset.json's train/val split with the
-                 contents of `splits/{split_name}.json`. Common DyCheck splits
-                 are "train", "val", "common", "novel". If None, fall back to
-                 the dataset.json split (NeRFies behavior).
+    scene_dir:        path to the scene directory.
+    image_scale:      which `rgb/${image_scale}x/` subdirectory to read frames from.
+    split_name:       if given, override dataset.json's train/val split with the
+                      contents of `splits/{split_name}.json`. Common DyCheck splits
+                      are "train", "val", "common", "novel". If None, fall back to
+                      the dataset.json split (NeRFies behavior).
+    allow_distortion: forwarded to load_nerfies. DyCheck cameras are iPhone-
+                      captured and typically have non-zero distortion; pass
+                      True for code-path smokes only.
 
     Returns: MonocularDataset.
     """
     scene_dir = Path(scene_dir)
-    ds = load_nerfies(scene_dir, image_scale=image_scale)
+    ds = load_nerfies(scene_dir, image_scale=image_scale, allow_distortion=allow_distortion)
     if split_name is None:
         return ds
 

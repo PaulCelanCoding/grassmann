@@ -42,13 +42,21 @@ from grassmann.training import Trainer, TrainerConfig
 DTYPE = torch.float32
 
 
-def _load_dataset(name: str, scene_dir: Path, image_scale: int, split: str | None):
+def _load_dataset(
+    name: str,
+    scene_dir: Path,
+    image_scale: int,
+    split: str | None,
+    allow_distortion: bool,
+):
     if name == "nerfies":
         if split is not None:
             print(f"  [warning] --split is ignored for --dataset nerfies (no splits/ dir)")
-        return load_nerfies(scene_dir, image_scale=image_scale)
+        return load_nerfies(scene_dir, image_scale=image_scale,
+                             allow_distortion=allow_distortion)
     if name == "dycheck":
-        return load_dycheck(scene_dir, image_scale=image_scale, split_name=split)
+        return load_dycheck(scene_dir, image_scale=image_scale, split_name=split,
+                             allow_distortion=allow_distortion)
     raise ValueError(f"Unknown --dataset {name!r}; expected nerfies|dycheck")
 
 
@@ -69,11 +77,17 @@ def main():
     ap.add_argument("--use_fast_rasterizer", action="store_true")
     ap.add_argument("--device", type=str, default=None,
                     help="cpu | cuda. Defaults to cuda if available.")
+    ap.add_argument("--allow_distortion", action="store_true",
+                    help="Treat scenes with non-zero radial/tangential distortion "
+                         "as pinhole. Geometry is approximate -- smoke runs only.")
     args = ap.parse_args()
 
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Loading {args.dataset} scene from {args.scene_dir} (image_scale={args.image_scale})")
-    ds = _load_dataset(args.dataset, args.scene_dir, args.image_scale, args.split)
+    ds = _load_dataset(
+        args.dataset, args.scene_dir, args.image_scale, args.split,
+        allow_distortion=args.allow_distortion,
+    )
     print(f"  T={ds.T}, points={ds.N_points}, H={ds.H}, W={ds.W}, "
           f"train={len(ds.train_indices)}, val={len(ds.val_indices)}")
 
@@ -112,8 +126,11 @@ def main():
         lr_pq=1e-3, lr_mean=5e-3, lr_L=5e-3,
         lr_opacity=5e-2, lr_color=5e-2,
         background=torch.zeros(3, dtype=DTYPE, device=device),
-        densify_every=500,
-        densify_start=2000,
+        # Density schedule mirrors standard 3DGS: dense events from 10% of the
+        # run through the end of the warm-up half, every 100 iters. With
+        # num_iters=5000 this gives ~25 events; with 30000 it gives ~145.
+        densify_every=100,
+        densify_start=max(args.num_iters // 10, 200),
         densify_stop=max(args.num_iters // 2, 2000),
         density_config=DensityConfig(
             opacity_threshold=0.001,

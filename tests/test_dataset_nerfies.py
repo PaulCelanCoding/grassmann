@@ -79,6 +79,21 @@ def test_radial_distortion_rejected(tmp_path):
         load_nerfies(tmp_path, image_scale=1)
 
 
+def test_allow_distortion_warns_and_loads(tmp_path):
+    """With allow_distortion=True, distortion downgrades to a one-shot warning."""
+    import warnings
+    from grassmann.datasets.nerfies import DistortionWarning
+
+    build_mini_nerfies_scene(tmp_path, distortion_radial=(0.01, 0.0, 0.0))
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        ds = load_nerfies(tmp_path, image_scale=1, allow_distortion=True)
+    assert ds.T == 4   # loaded successfully
+    distortion_warnings = [x for x in w if issubclass(x.category, DistortionWarning)]
+    assert len(distortion_warnings) == 1, \
+        f"Expected exactly one DistortionWarning, got {len(distortion_warnings)}"
+
+
 def test_missing_dir_raises(tmp_path):
     with pytest.raises(FileNotFoundError):
         load_nerfies(tmp_path / "does-not-exist", image_scale=1)

@@ -214,15 +214,22 @@ class Trainer:
     def validate(self) -> dict[str, float]:
         """Render held-out frames and compute mean L1.
 
-        Monocular mode: iterate over `validation_frames` (or all frames if None),
-        with cam_idx = t_idx.
+        Monocular mode: iterate over `validation_frames`. Raises if no frames
+        are configured -- silently falling back to all frames would report
+        training-set L1 as val_l1 (fake-success signal; see CLAUDE.md).
         Multi-cam (legacy): iterate over `validation_cams x validation_times`.
         """
         total_l1 = 0.0
         count = 0
         with torch.no_grad():
             if self.config.monocular:
-                frames = self.config.validation_frames or list(range(self.T))
+                frames = self.config.validation_frames
+                if not frames:
+                    raise ValueError(
+                        "Trainer.validate() called in monocular mode but "
+                        "config.validation_frames is empty. Set validation_frames "
+                        "to a held-out subset, or set validation_every=0."
+                    )
                 for t_idx in frames:
                     t_value = self.times[t_idx]
                     target = self.get_frame(t_idx, t_idx).to(self.model.p_im.dtype)
@@ -314,8 +321,20 @@ class Trainer:
         """
         cfg = config or TrainerConfig()
         cfg.monocular = True
-        if cfg.validation_frames is None and dataset.val_indices:
-            cfg.validation_frames = list(dataset.val_indices)
+        if cfg.validation_frames is None:
+            if dataset.val_indices:
+                cfg.validation_frames = list(dataset.val_indices)
+            elif cfg.validation_every > 0:
+                # No val split shipped: refuse to silently report training-set
+                # L1 as val_l1 (would be a fake-success signal). Disable val.
+                import warnings
+                warnings.warn(
+                    "from_monocular_dataset: dataset has no val_indices and no "
+                    "validation_frames override; disabling validation to avoid "
+                    "reporting training-set loss as val_l1.",
+                    RuntimeWarning, stacklevel=2,
+                )
+                cfg.validation_every = 0
 
         # Adapter: in monocular mode train_step calls get_frame(cam_idx=frame, t_idx=frame),
         # which calls self.frame_data(cam_idx, t_value). Discard the t_value -- we have
