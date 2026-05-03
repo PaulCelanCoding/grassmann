@@ -14,11 +14,12 @@ import json
 import sys
 from pathlib import Path
 
-_REPO_ROOT = Path(__file__).resolve().parent.parent
+# Archived under legacy/multi_camera/scripts/ -- repo root is 4 levels up.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
-# scripts/ also needs to be importable for the `from train_n3dv import ...` line below.
-_SCRIPTS_DIR = _REPO_ROOT / "scripts"
+# Sibling import: train_n3dv lives in the same legacy/multi_camera/scripts/ dir.
+_SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 

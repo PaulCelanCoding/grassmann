@@ -40,9 +40,8 @@ import os
 import sys
 from pathlib import Path
 
-# Allow `python scripts/train_n3dv.py ...` from the repo root without installing
-# the grassmann package. Mirrors what Modal does via add_local_python_source.
-_REPO_ROOT = Path(__file__).resolve().parent.parent
+# Archived under legacy/multi_camera/scripts/ -- repo root is 4 levels up.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
