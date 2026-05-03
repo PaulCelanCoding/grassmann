@@ -46,3 +46,6 @@ wandb/
 *.log
 output/
 outputs/
+
+# Claude Code internal state
+.claude/
