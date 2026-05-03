@@ -26,6 +26,7 @@ env/
 data/n3dv/*/
 data/nerfies/*/
 data/dycheck/*/
+data/**/*.zip
 !data/n3dv/.gitkeep
 !data/nerfies/.gitkeep
 !data/dycheck/.gitkeep
