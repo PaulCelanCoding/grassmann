@@ -113,6 +113,7 @@ def train(
     init_strategy: str,
     split: str | None,
     allow_distortion: bool,
+    log_every: int,
 ) -> None:
     scene_dir = _ensure_scene_unpacked(scene)
     out_dir = f"/checkpoints/{dataset}-{scene}-{init_strategy}-{num_iters}it"
@@ -122,6 +123,7 @@ def train(
         "--scene_dir", scene_dir,
         "--output_dir", out_dir,
         "--num_iters", str(num_iters),
+        "--log_every", str(log_every),
         "--image_scale", str(image_scale),
         "--init_strategy", init_strategy,
     ]
@@ -140,25 +142,34 @@ def main(
     cmd: str = "smoke",
     dataset: str = "nerfies",
     scene: str = "slice-banana",
-    iters: int = 30000,
+    iters: int = 500,
+    log_every: int = 50,
     init_strategy: str = "median",
     split: str = "",
     allow_distortion: bool = True,  # default True: every shipped scene has it
 ):
+    """
+    --cmd smoke: short run (--iters used; default 500) at scale 4. Validates
+                 code path AND prints per-log_every loss to confirm convergence.
+    --cmd train: full run at scale 2.
+    """
     split_arg = split or None
     if cmd == "smoke":
         train.remote(
             dataset=dataset, scene=scene,
-            num_iters=100, image_scale=4, use_fast=True,
+            num_iters=iters, image_scale=4, use_fast=True,
             init_strategy=init_strategy, split=split_arg,
             allow_distortion=allow_distortion,
+            log_every=log_every,
         )
     elif cmd == "train":
         train.remote(
             dataset=dataset, scene=scene,
-            num_iters=iters, image_scale=2, use_fast=True,
+            num_iters=iters if iters != 500 else 30000,  # default to 30k for full train
+            image_scale=2, use_fast=True,
             init_strategy=init_strategy, split=split_arg,
             allow_distortion=allow_distortion,
+            log_every=log_every if log_every != 50 else 200,  # default 200 for full train
         )
     else:
         raise SystemExit(f"unknown --cmd {cmd!r}; expected smoke|train")
