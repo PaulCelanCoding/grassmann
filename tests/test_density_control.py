@@ -230,6 +230,56 @@ def test_optimizer_rebuild_after_density_op():
     assert model_params.issubset(opt_params), "Not all model params are in the optimizer"
 
 
+def test_adam_state_preserved_for_kept_splats():
+    """RCA Bug D: after a density event, kept splats must retain their Adam moments
+    (exp_avg, exp_avg_sq). Only newly-cloned/split rows start at zero."""
+    model, scene = small_model(n_points=4)
+    optimizer = build_optimizer(model)
+    tracker = DensityTracker(model, optimizer)
+
+    # Run a few forward+backward+step cycles so Adam state is populated.
+    for _ in range(3):
+        params = model.forward()
+        derived = compute_derived(params)
+        tc = condition_on_time(params, derived, 1.0)
+        sg = project_to_screen(params, tc, scene.cameras[0])
+        img = rasterize(sg, H=scene.H, W=scene.W)
+        loss = img.mean()
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+    # Snapshot exp_avg for alpha_0 BEFORE density op.
+    before = optimizer.state[model.alpha_0]["exp_avg"].clone()
+    assert before.norm() > 0, "Adam state should be populated after some steps"
+
+    # Force a prune of row 0 only (drop_mask = [True, False, False, False]).
+    config = DensityConfig(
+        opacity_threshold=10.0,    # above 1.0 => prune nothing by opacity
+        scale_min=1e-12, scale_max=1e12,  # never trigger by scale
+        grad_threshold=1e12,       # never clone/split
+    )
+    # Hand-craft a single-row prune by directly calling _keep_rows.
+    keep = torch.tensor([False, True, True, True])
+    tracker._keep_rows(keep)
+
+    # After prune, the alpha_0 Parameter is a NEW object; its Adam state must be
+    # the original `before` tensor sliced to [1:] (rows 1, 2, 3 kept).
+    after = optimizer.state[model.alpha_0]["exp_avg"]
+    expected = before[[1, 2, 3]]
+    assert torch.allclose(after, expected), \
+        f"Adam exp_avg not preserved after prune.\nbefore[1:]={expected}\nafter={after}"
+    # Now run a clone (replicate row 0) and check the cloned row has exp_avg=0.
+    n_before = model.alpha_0.shape[0]
+    clone_mask = torch.tensor([True, False, False])
+    tracker._perform_clone(clone_mask)
+    after_clone = optimizer.state[model.alpha_0]["exp_avg"]
+    # First n_before rows: same as `after`. Last row: zero (newly cloned).
+    assert torch.allclose(after_clone[:n_before], after), "Pre-clone state not preserved"
+    assert after_clone[-1].abs().item() == 0.0, \
+        f"Newly cloned row should have zero Adam moment; got {after_clone[-1]}"
+
+
 # =============================================================================
 # End-to-end: Trainer with density control enabled
 # =============================================================================

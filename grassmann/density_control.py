@@ -24,16 +24,18 @@ our parameterization, plus the Grassmann paper's §3.5 suggestions:
 We track the moving-average gradient of alpha_0 and beta_0 (the "projected
 mean" in local plane coordinates) as a proxy for where the model is struggling.
 
-The density control manipulates the TrainableGaussians' parameters IN PLACE,
-removing / adding rows. Because this changes the parameter count, we also
-rebuild the optimizer afterward (Adam's moment buffers need re-alignment).
+The density control manipulates the TrainableGaussians' parameters in place by
+slicing/extending each parameter tensor along axis 0. Crucially, the matching
+Adam moments (`exp_avg`, `exp_avg_sq`) are sliced/extended in lockstep so that
+optimizer state is preserved for kept splats and only zero-initialized for new
+splats (RCA Bug D fix; standard 3DGS does the same).
 
 Public API:
-    tracker = DensityTracker(model)
+    tracker = DensityTracker(model, optimizer)
     ... in training loop ...
     tracker.accumulate()      # call after each .backward() (before optimizer.step())
     if iter % densify_every == 0:
-        model, optimizer = tracker.densify_and_prune(config, optimizer_builder)
+        stats = tracker.densify_and_prune(config)   # mutates model + optimizer in place
 """
 from __future__ import annotations
 
@@ -45,6 +47,13 @@ from torch import Tensor, nn
 
 from .gaussian import GaussianParams, compute_derived
 from .trainable import TrainableGaussians, build_optimizer
+
+
+# Names of the per-Gaussian parameters on TrainableGaussians whose row-axis
+# (axis 0, length N) must be kept in sync with density operations.
+_PER_GAUSSIAN_PARAMS = (
+    "p_im", "q_im", "alpha_0", "beta_0", "L", "opacity_logit", "color_logit",
+)
 
 
 @dataclass
@@ -70,13 +79,22 @@ class DensityTracker:
     Call `accumulate()` after each loss.backward() (before optimizer.step()).
     It reads gradients on alpha_0 / beta_0 and maintains a running norm.
 
-    Later, call `densify_and_prune(config, optimizer_builder)` to apply the
-    control operations. This mutates the model (adds/removes Gaussians) and
-    returns a fresh optimizer rebuilt over the new parameters.
+    Later, call `densify_and_prune(config)` to apply the control operations.
+    This mutates the model (adds/removes Gaussians) and surgically updates the
+    optimizer state so that Adam moments are preserved for kept splats.
+
+    The optimizer argument is optional only for unit tests that exercise the
+    splat-manipulation logic in isolation. In a real training loop, always
+    pass it so Bug D (Adam-state reset every density event) does not recur.
     """
 
-    def __init__(self, model: TrainableGaussians):
+    def __init__(
+        self,
+        model: TrainableGaussians,
+        optimizer: Optional[torch.optim.Optimizer] = None,
+    ):
         self.model = model
+        self.optimizer = optimizer
         device = model.alpha_0.device
         dtype = model.alpha_0.dtype
         N = model.N
@@ -114,17 +132,67 @@ class DensityTracker:
 
     # --- Operations ---
 
+    def _migrate_optimizer_state(
+        self,
+        old_param: nn.Parameter,
+        new_param: nn.Parameter,
+        *,
+        slice_idx: Optional[Tensor] = None,
+        append_zero_count: int = 0,
+    ) -> None:
+        """Replace `old_param` with `new_param` in the optimizer and migrate state.
+
+        Behavior depends on the kwargs:
+          - slice_idx given: state tensors are sliced along axis 0 by `slice_idx`
+            (used for prune / split removal of original rows).
+          - append_zero_count > 0: state tensors get `append_zero_count` zero rows
+            appended along axis 0 (used for clone / split which append new rows).
+          - both default: state is migrated as-is (no shape change).
+
+        If self.optimizer is None, this is a no-op (unit-test path).
+        """
+        opt = self.optimizer
+        if opt is None:
+            return
+        for group in opt.param_groups:
+            for i, p in enumerate(group["params"]):
+                if p is not old_param:
+                    continue
+                state = opt.state.pop(old_param, None)
+                if state is not None:
+                    new_state: dict = {}
+                    if "step" in state:
+                        new_state["step"] = state["step"]
+                    for key in ("exp_avg", "exp_avg_sq"):
+                        if key not in state:
+                            continue
+                        t = state[key]
+                        if slice_idx is not None:
+                            new_t = t[slice_idx].contiguous()
+                        elif append_zero_count > 0:
+                            pad_shape = (append_zero_count,) + tuple(t.shape[1:])
+                            pad = torch.zeros(pad_shape, dtype=t.dtype, device=t.device)
+                            new_t = torch.cat([t, pad], dim=0).contiguous()
+                        else:
+                            new_t = t
+                        new_state[key] = new_t
+                    opt.state[new_param] = new_state
+                group["params"][i] = new_param
+                return
+
     def _keep_rows(self, keep_mask: Tensor) -> None:
-        """Filter all per-Gaussian parameters to keep only rows where keep_mask is True."""
+        """Filter all per-Gaussian parameters to keep only rows where keep_mask is True.
+
+        Adam state (exp_avg, exp_avg_sq) is sliced in lockstep so kept splats
+        retain their moment history.
+        """
         idx = torch.nonzero(keep_mask, as_tuple=True)[0]
         with torch.no_grad():
-            self.model.p_im = nn.Parameter(self.model.p_im.data[idx].contiguous())
-            self.model.q_im = nn.Parameter(self.model.q_im.data[idx].contiguous())
-            self.model.alpha_0 = nn.Parameter(self.model.alpha_0.data[idx].contiguous())
-            self.model.beta_0 = nn.Parameter(self.model.beta_0.data[idx].contiguous())
-            self.model.L = nn.Parameter(self.model.L.data[idx].contiguous())
-            self.model.opacity_logit = nn.Parameter(self.model.opacity_logit.data[idx].contiguous())
-            self.model.color_logit = nn.Parameter(self.model.color_logit.data[idx].contiguous())
+            for name in _PER_GAUSSIAN_PARAMS:
+                old = getattr(self.model, name)
+                new = nn.Parameter(old.data[idx].contiguous())
+                setattr(self.model, name, new)
+                self._migrate_optimizer_state(old, new, slice_idx=idx)
         # Re-index tracker state.
         self.grad_accum = self.grad_accum[idx].contiguous()
         self.grad_counts = self.grad_counts[idx].contiguous()
@@ -134,17 +202,23 @@ class DensityTracker:
         p_im: Tensor, q_im: Tensor, alpha_0: Tensor, beta_0: Tensor,
         L: Tensor, opacity_logit: Tensor, color_logit: Tensor,
     ) -> None:
-        """Append new Gaussian rows to the model's parameters."""
-        with torch.no_grad():
-            self.model.p_im = nn.Parameter(torch.cat([self.model.p_im.data, p_im], dim=0).contiguous())
-            self.model.q_im = nn.Parameter(torch.cat([self.model.q_im.data, q_im], dim=0).contiguous())
-            self.model.alpha_0 = nn.Parameter(torch.cat([self.model.alpha_0.data, alpha_0], dim=0).contiguous())
-            self.model.beta_0 = nn.Parameter(torch.cat([self.model.beta_0.data, beta_0], dim=0).contiguous())
-            self.model.L = nn.Parameter(torch.cat([self.model.L.data, L], dim=0).contiguous())
-            self.model.opacity_logit = nn.Parameter(torch.cat([self.model.opacity_logit.data, opacity_logit], dim=0).contiguous())
-            self.model.color_logit = nn.Parameter(torch.cat([self.model.color_logit.data, color_logit], dim=0).contiguous())
-        # Extend tracker state with zeros for new rows.
+        """Append new Gaussian rows to the model's parameters.
+
+        Adam moments for the new rows are zero-initialized (standard 3DGS); the
+        moments for existing rows are carried over verbatim.
+        """
+        new_data = {
+            "p_im": p_im, "q_im": q_im, "alpha_0": alpha_0, "beta_0": beta_0,
+            "L": L, "opacity_logit": opacity_logit, "color_logit": color_logit,
+        }
         n_new = p_im.shape[0]
+        with torch.no_grad():
+            for name in _PER_GAUSSIAN_PARAMS:
+                old = getattr(self.model, name)
+                new = nn.Parameter(torch.cat([old.data, new_data[name]], dim=0).contiguous())
+                setattr(self.model, name, new)
+                self._migrate_optimizer_state(old, new, append_zero_count=n_new)
+        # Extend tracker state with zeros for new rows.
         device = self.grad_accum.device
         dtype = self.grad_accum.dtype
         self.grad_accum = torch.cat([self.grad_accum, torch.zeros(n_new, dtype=dtype, device=device)])
@@ -279,24 +353,42 @@ class DensityTracker:
         keep_mask[idx] = False
         self._keep_rows(keep_mask)
 
-    # --- Convenience wrapper: do it all + rebuild optimizer ---
+    # --- Convenience wrapper ---
 
     def densify_and_prune(
         self,
         config: DensityConfig,
-        optimizer_builder: Callable[[TrainableGaussians], torch.optim.Optimizer],
-    ) -> tuple[torch.optim.Optimizer, dict]:
-        """Apply clone, split, prune in one call. Returns a fresh optimizer and stats.
+        optimizer_builder: Optional[Callable[[TrainableGaussians], torch.optim.Optimizer]] = None,
+    ) -> tuple[Optional[torch.optim.Optimizer], dict]:
+        """Apply clone, split, prune in one call.
+
+        The model and the registered optimizer (passed to __init__) are mutated
+        in place: parameter tensors are sliced/extended along axis 0 and Adam
+        moments follow in lockstep -- kept splats retain their `exp_avg` and
+        `exp_avg_sq`; new splats start at zero. This is the RCA Bug D fix.
+
+        `optimizer_builder` is accepted for backward compatibility: if provided
+        and no optimizer was registered with the tracker, it is invoked once at
+        the end to build a fresh optimizer (the legacy behavior, which loses
+        Adam state). Prefer `DensityTracker(model, optimizer)` instead.
 
         Returns:
-            new_optimizer: an Adam rebuilt over the (possibly resized) parameters.
+            (optimizer, stats). The returned optimizer is the same object that
+            was registered (state migrated in place), or a freshly built one
+            from the legacy `optimizer_builder` path, or None if neither was
+            provided.
             stats: {'pruned', 'cloned', 'split', 'final_N'}.
         """
         n_cloned, n_split = self.clone_and_split(config)
         n_pruned = self.prune(config)
         self.reset()
-        new_opt = optimizer_builder(self.model)
-        return new_opt, {
+        if self.optimizer is not None:
+            opt_out = self.optimizer
+        elif optimizer_builder is not None:
+            opt_out = optimizer_builder(self.model)
+        else:
+            opt_out = None
+        return opt_out, {
             "pruned": n_pruned,
             "cloned": n_cloned,
             "split": n_split,

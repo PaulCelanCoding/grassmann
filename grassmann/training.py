@@ -114,10 +114,12 @@ class Trainer:
         )
         self.optimizer = self._build_opt(model)
 
-        # Density control (Phase 6)
+        # Density control (Phase 6). The tracker holds a reference to the
+        # optimizer so density events can migrate Adam state in place rather
+        # than rebuilding from scratch (RCA Bug D fix).
         self.density_tracker: Optional[DensityTracker] = None
         if self.config.densify_every > 0:
-            self.density_tracker = DensityTracker(model)
+            self.density_tracker = DensityTracker(model, self.optimizer)
             if self.config.density_config is None:
                 self.config.density_config = DensityConfig()
 
@@ -249,7 +251,7 @@ class Trainer:
                     and self.config.densify_start <= i <= self.config.densify_stop
                     and i % self.config.densify_every == 0):
                 self.optimizer, stats = self.density_tracker.densify_and_prune(
-                    self.config.density_config, self._build_opt,
+                    self.config.density_config,
                 )
                 print(f"  [density @ iter {i:5d}] pruned={stats['pruned']:4d} "
                       f"cloned={stats['cloned']:4d} split={stats['split']:4d} "
