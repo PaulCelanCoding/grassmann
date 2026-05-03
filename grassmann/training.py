@@ -58,6 +58,7 @@ class TrainerConfig:
     validation_every: int = 0          # 0 = disabled
     validation_cams: Optional[list[int]] = None  # which camera indices to evaluate on
     validation_times: Optional[list[float]] = None  # which times
+    validation_frames: Optional[list[int]] = None  # monocular: which frame indices
     # Density control (Phase 6)
     densify_every: int = 0            # 0 = disabled
     densify_start: int = 500          # don't start densification before this iteration
@@ -66,6 +67,8 @@ class TrainerConfig:
     # Fast rasterizer (Phase 7)
     use_fast_rasterizer: bool = False  # True -> use CUDA diff-gaussian-rasterization if available
     fast_raster_config: Optional[FastRasterConfig] = None  # defaults built if None
+    # Sampling mode
+    monocular: bool = False  # True -> cameras list is per-frame; t_idx == cam_idx; one sample per step
 
 
 FrameData = Union[Tensor, Callable[[int, float], Tensor]]
@@ -168,9 +171,14 @@ class Trainer:
 
     def train_step(self) -> tuple[float, float]:
         """One stochastic training step. Returns (total loss, L1 component)."""
-        # Sample a random (camera, frame) pair.
-        cam_idx = torch.randint(0, self.K, (1,)).item()
-        t_idx = torch.randint(0, self.T, (1,)).item()
+        # Sample a frame.
+        if self.config.monocular:
+            # Monocular: one camera per frame, sampled together. self.K must equal self.T.
+            t_idx = torch.randint(0, self.T, (1,)).item()
+            cam_idx = t_idx
+        else:
+            cam_idx = torch.randint(0, self.K, (1,)).item()
+            t_idx = torch.randint(0, self.T, (1,)).item()
         t_value = self.times[t_idx]
 
         # Target and rendered.
@@ -204,25 +212,36 @@ class Trainer:
         self.model.renormalize_manifold_()
 
     def validate(self) -> dict[str, float]:
-        """Render held-out (cam, time) pairs and compute mean L1."""
-        cam_indices = self.config.validation_cams or list(range(self.K))
-        times = self.config.validation_times or self.times
+        """Render held-out frames and compute mean L1.
 
+        Monocular mode: iterate over `validation_frames` (or all frames if None),
+        with cam_idx = t_idx.
+        Multi-cam (legacy): iterate over `validation_cams x validation_times`.
+        """
         total_l1 = 0.0
         count = 0
         with torch.no_grad():
-            for cam_idx in cam_indices:
-                for t_idx, t_value in enumerate(times):
-                    # Find the closest time index in self.times that matches t_value.
-                    # For simplicity assume times in config.validation_times are a subset of self.times.
-                    try:
-                        t_frame_idx = self.times.index(t_value)
-                    except ValueError:
-                        continue
-                    target = self.get_frame(cam_idx, t_frame_idx).to(self.model.p_im.dtype)
-                    rendered = self.render_one(cam_idx, t_value)
+            if self.config.monocular:
+                frames = self.config.validation_frames or list(range(self.T))
+                for t_idx in frames:
+                    t_value = self.times[t_idx]
+                    target = self.get_frame(t_idx, t_idx).to(self.model.p_im.dtype)
+                    rendered = self.render_one(t_idx, t_value)
                     total_l1 += l1_loss(rendered, target).item()
                     count += 1
+            else:
+                cam_indices = self.config.validation_cams or list(range(self.K))
+                times = self.config.validation_times or self.times
+                for cam_idx in cam_indices:
+                    for t_idx, t_value in enumerate(times):
+                        try:
+                            t_frame_idx = self.times.index(t_value)
+                        except ValueError:
+                            continue
+                        target = self.get_frame(cam_idx, t_frame_idx).to(self.model.p_im.dtype)
+                        rendered = self.render_one(cam_idx, t_value)
+                        total_l1 += l1_loss(rendered, target).item()
+                        count += 1
         return {"val_l1": total_l1 / max(count, 1)}
 
     def train(self, num_iters: Optional[int] = None, log_every: Optional[int] = None,
@@ -280,3 +299,38 @@ class Trainer:
                 running_l1 = 0.0
 
         return self.history
+
+    @classmethod
+    def from_monocular_dataset(
+        cls,
+        model: TrainableGaussians,
+        dataset,                                 # MonocularDataset (avoid import cycle)
+        config: Optional[TrainerConfig] = None,
+    ) -> "Trainer":
+        """Build a monocular Trainer from a MonocularDataset.
+
+        Couples the per-frame Camera and per-frame target image so each step
+        samples a single frame: cam_idx == t_idx == frame_idx.
+        """
+        cfg = config or TrainerConfig()
+        cfg.monocular = True
+        if cfg.validation_frames is None and dataset.val_indices:
+            cfg.validation_frames = list(dataset.val_indices)
+
+        # Adapter: in monocular mode train_step calls get_frame(cam_idx=frame, t_idx=frame),
+        # which calls self.frame_data(cam_idx, t_value). Discard the t_value -- we have
+        # the frame index already in cam_idx.
+        loader = dataset.frame_loader
+
+        def adapter(cam_idx: int, t_value: float) -> Tensor:
+            return loader(cam_idx)
+
+        return cls(
+            model=model,
+            cameras=dataset.cameras_per_frame,
+            frame_data=adapter,
+            times=dataset.times.tolist(),
+            H=dataset.H,
+            W=dataset.W,
+            config=cfg,
+        )

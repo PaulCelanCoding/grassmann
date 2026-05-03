@@ -184,3 +184,34 @@ def test_missing_required_files_raises(tmp_path):
     (tmp_path / "camera").mkdir()
     with pytest.raises(FileNotFoundError, match="dataset.json"):
         load_nerfies(tmp_path, image_scale=1)
+
+
+def test_trainer_from_monocular_dataset_runs(mini_scene):
+    """End-to-end smoke: monocular Trainer with a NeRFies mini-scene runs N steps
+    without error and the loss is finite."""
+    from grassmann.datasets.nerfies import load_nerfies
+    from grassmann.initialization import init_gaussians_from_points
+    from grassmann.trainable import trainable_from_params
+    from grassmann.training import Trainer, TrainerConfig
+
+    ds = load_nerfies(mini_scene, image_scale=1)
+    # Initialize 3 Gaussians from the scene points (using the first frame's camera).
+    params = init_gaussians_from_points(
+        ds.points3D[:3].to(torch.float32),
+        torch.tensor([float(ds.times[0]), float(ds.times[1]), float(ds.times[2])]),
+        ds.cameras_per_frame,
+        sigma_aa=0.02, sigma_bb=0.05, opacity=0.5, sigma_k_pixel=1.0, sigma_k_temporal=0.0,
+    )
+    model = trainable_from_params(params, dtype=torch.float32)
+
+    cfg = TrainerConfig(
+        num_iters=3, log_every=3,
+        background=torch.zeros(3, dtype=torch.float32),
+    )
+    trainer = Trainer.from_monocular_dataset(model, ds, cfg)
+    assert trainer.config.monocular is True
+    assert trainer.K == ds.T  # one camera per frame
+
+    history = trainer.train()
+    assert len(history["loss"]) >= 1
+    assert all(torch.isfinite(torch.tensor(v)) for v in history["loss"])
