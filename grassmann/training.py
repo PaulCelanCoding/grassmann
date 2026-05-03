@@ -175,8 +175,14 @@ class Trainer:
             frame = self.frame_data(cam_idx, self.times[t_idx])
         return frame.to(device=self.model.n_raw.device)
 
-    def render_one(self, cam_idx: int, t_value: float) -> Tensor:
-        """Render the current model from camera cam_idx at time t_value."""
+    def render_one(self, cam_idx: int, t_value: float,
+                   means2d_capture: Optional[list] = None) -> Tensor:
+        """Render the current model from camera cam_idx at time t_value.
+
+        When `means2d_capture` is a list, the means2D dummy tensor (which gets
+        screen-space gradients from the CUDA kernel after backward) is appended
+        to it. Used by DensityTracker for the screen-space ‖∇μ_2d‖ trigger.
+        """
         params = self.model.forward()
         bg = self.config.background.to(dtype=params.color.dtype, device=params.color.device)
         if self.config.use_fast_rasterizer and fast_available() and params.n.is_cuda:
@@ -185,8 +191,11 @@ class Trainer:
                 params, t_value, self.cameras[cam_idx], self.H, self.W,
                 background=bg, config=fc,
                 static_baseline=self.config.static_baseline,
+                means2d_capture=means2d_capture,
             )
         # Fallback: toy rasterizer path (also used when no GPU or no extension).
+        if means2d_capture is not None:
+            means2d_capture.append(None)
         derived = compute_derived(params)
         tc = condition_on_time(params, derived, t_value, static=self.config.static_baseline)
         sg = project_to_screen(params, tc, self.cameras[cam_idx])
@@ -206,9 +215,11 @@ class Trainer:
             t_idx = torch.randint(0, self.T, (1,)).item()
         t_value = self.times[t_idx]
 
-        # Target and rendered.
+        # Target and rendered. If DC is enabled, capture the means2D dummy
+        # tensor so the tracker can read screen-space gradients post-backward.
+        means2d_capture: Optional[list] = [] if self.density_tracker is not None else None
         target = self.get_frame(cam_idx, t_idx).to(self.model.n_raw.dtype)
-        rendered = self.render_one(cam_idx, t_value)
+        rendered = self.render_one(cam_idx, t_value, means2d_capture=means2d_capture)
 
         # Loss.
         loss = photometric_loss(
@@ -248,7 +259,8 @@ class Trainer:
 
         # Density-control gradient accumulation (reads .grad BEFORE optimizer.step()).
         if self.density_tracker is not None:
-            self.density_tracker.accumulate()
+            means2d = means2d_capture[0] if means2d_capture else None
+            self.density_tracker.accumulate(means2d)
 
         self.optimizer.step()
 
@@ -349,12 +361,11 @@ class Trainer:
                     and self.config.densify_every > 0
                     and self.config.densify_start <= i <= self.config.densify_stop
                     and i % self.config.densify_every == 0):
-                self.optimizer, stats = self.density_tracker.densify_and_prune(
+                stats = self.density_tracker.densify_and_prune(
                     self.config.density_config,
                 )
-                print(f"  [density @ iter {i:5d}] pruned={stats['pruned']:4d} "
-                      f"cloned={stats['cloned']:4d} split={stats['split']:4d} "
-                      f"N={stats['final_N']}")
+                print(f"  [density @ iter {i:5d}] split={stats['split']:4d} "
+                      f"pruned={stats['pruned']:4d} N={stats['final_N']}")
 
             if i % le == 0:
                 avg_loss = running_loss / le

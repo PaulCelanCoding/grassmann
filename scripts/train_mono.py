@@ -33,6 +33,7 @@ import torch
 
 from grassmann.datasets.dycheck import load_dycheck
 from grassmann.datasets.nerfies import load_nerfies
+from grassmann.density_control import DensityConfig
 from grassmann.fast_rasterizer import FastRasterConfig
 from grassmann.initialization import init_gaussians_from_points
 from grassmann.trainable import trainable_from_params
@@ -95,8 +96,30 @@ def main():
                     help="Treat scenes with non-zero radial/tangential distortion "
                          "as pinhole. Geometry is approximate -- smoke runs only.")
     ap.add_argument("--densify_every", type=int, default=0,
-                    help="Density-control event frequency. 0 disables density control. "
-                         "Phase A: must be 0 (DC targets the legacy 2-plane param).")
+                    help="Density-control event frequency. 0 disables. Phase C: "
+                         "200 is a reasonable default; standard 3DGS uses 100.")
+    ap.add_argument("--densify_start", type=int, default=500,
+                    help="Earliest iter at which DC events fire. Lets the model "
+                         "settle before mutating the Gaussian set.")
+    ap.add_argument("--densify_stop", type=int, default=10000,
+                    help="Latest iter at which DC events fire. Past this point "
+                         "training is fixed-N to allow convergence.")
+    ap.add_argument("--grad_threshold", type=float, default=2e-4,
+                    help="Screen-space ‖∇μ_2d‖ threshold above which a Gaussian "
+                         "is 'stressed' and eligible for split.")
+    ap.add_argument("--spatial_split_threshold", type=float, default=0.5,
+                    help="λ_max(Σ_3D) above which a stressed Gaussian SPLITS. "
+                         "In scene units²; 0.5 ≈ (0.7m std) at scene scale 1m.")
+    ap.add_argument("--max_split_per_event", type=int, default=0,
+                    help="Cap on #splits per DC cycle (0 = unlimited). Useful "
+                         "to prevent N-explosion in early iters.")
+    ap.add_argument("--opacity_prune_threshold", type=float, default=1e-3,
+                    help="Prune Gaussian if sigmoid(opacity_logit) < this. More "
+                         "conservative than standard 3DGS (0.005).")
+    ap.add_argument("--scale_min_prune", type=float, default=1e-6,
+                    help="Prune Gaussian if λ_min(Σ_3D) < this (collapsed disk).")
+    ap.add_argument("--scale_max_prune", type=float, default=100.0,
+                    help="Prune Gaussian if λ_max(Σ_3D) > this (runaway disk).")
     ap.add_argument("--seed", type=int, default=None,
                     help="Optional seed for the random initialization (n, L_raw).")
     ap.add_argument("--static_baseline", action="store_true",
@@ -142,12 +165,6 @@ def main():
                     help="Bounded anisotropy penalty on Σ_3D(t_0). Trims the runaway "
                          "λ_max/λ_min tail. 0 disables. Recommended ≈1e-3 (small).")
     args = ap.parse_args()
-
-    if args.densify_every != 0:
-        raise SystemExit(
-            "Phase A: --densify_every must be 0; legacy DC is incompatible with the "
-            "3-plane projector parameterization. See Phase C in the plan."
-        )
 
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Loading {args.dataset} scene from {args.scene_dir} (image_scale={args.image_scale})")
@@ -249,6 +266,16 @@ def main():
         lr_opacity=5e-2, lr_color=5e-2,
         background=torch.zeros(3, dtype=DTYPE, device=device),
         densify_every=args.densify_every,
+        densify_start=args.densify_start,
+        densify_stop=args.densify_stop,
+        density_config=DensityConfig(
+            grad_threshold=args.grad_threshold,
+            spatial_split_threshold=args.spatial_split_threshold,
+            max_split_per_event=args.max_split_per_event,
+            opacity_threshold=args.opacity_prune_threshold,
+            scale_min=args.scale_min_prune,
+            scale_max=args.scale_max_prune,
+        ),
         use_fast_rasterizer=args.use_fast_rasterizer,
         fast_raster_config=FastRasterConfig(sigma_3d_blur=args.sigma_3d_blur),
         validation_every=max(args.log_every, args.num_iters // 10),

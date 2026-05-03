@@ -128,6 +128,13 @@ def train(
     lambda_frob: float,
     opacity_reset_every: int,
     lambda_aniso: float,
+    densify_every: int,
+    densify_start: int,
+    densify_stop: int,
+    grad_threshold: float,
+    spatial_split_threshold: float,
+    max_split_per_event: int,
+    opacity_prune_threshold: float,
 ) -> None:
     scene_dir = _ensure_scene_unpacked(scene)
     suffix = f"-{run_tag}" if run_tag else ""
@@ -165,6 +172,15 @@ def train(
         argv += ["--opacity_reset_every", str(opacity_reset_every)]
     if lambda_aniso > 0.0:
         argv += ["--lambda_aniso", str(lambda_aniso)]
+    if densify_every > 0:
+        argv += ["--densify_every", str(densify_every),
+                 "--densify_start", str(densify_start),
+                 "--densify_stop", str(densify_stop),
+                 "--grad_threshold", str(grad_threshold),
+                 "--spatial_split_threshold", str(spatial_split_threshold),
+                 "--opacity_prune_threshold", str(opacity_prune_threshold)]
+        if max_split_per_event > 0:
+            argv += ["--max_split_per_event", str(max_split_per_event)]
     _run(argv)
     ckpt_vol.commit()
 
@@ -236,6 +252,13 @@ def main(
     lambda_frob: float = 0.0,
     opacity_reset_every: int = 0,
     lambda_aniso: float = 0.0,
+    densify_every: int = 0,
+    densify_start: int = 500,
+    densify_stop: int = 10000,
+    grad_threshold: float = 2e-4,
+    spatial_split_threshold: float = 0.5,
+    max_split_per_event: int = 0,
+    opacity_prune_threshold: float = 1e-3,
 ):
     """
     --cmd smoke:  short run (--iters used; default 500) at scale 4. Validates
@@ -264,6 +287,13 @@ def main(
             lambda_frob=lambda_frob,
             opacity_reset_every=opacity_reset_every,
             lambda_aniso=lambda_aniso,
+            densify_every=densify_every,
+            densify_start=densify_start,
+            densify_stop=densify_stop,
+            grad_threshold=grad_threshold,
+            spatial_split_threshold=spatial_split_threshold,
+            max_split_per_event=max_split_per_event,
+            opacity_prune_threshold=opacity_prune_threshold,
         )
     elif cmd == "train":
         train.remote(
@@ -285,6 +315,13 @@ def main(
             lambda_frob=lambda_frob,
             opacity_reset_every=opacity_reset_every,
             lambda_aniso=lambda_aniso,
+            densify_every=densify_every,
+            densify_start=densify_start,
+            densify_stop=densify_stop,
+            grad_threshold=grad_threshold,
+            spatial_split_threshold=spatial_split_threshold,
+            max_split_per_event=max_split_per_event,
+            opacity_prune_threshold=opacity_prune_threshold,
         )
     elif cmd == "render":
         if not ckpt:

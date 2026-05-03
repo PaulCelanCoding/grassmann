@@ -277,6 +277,8 @@ def fast_rasterize(
     # means2D: a dummy tensor for 2D-gradient tracking (used by adaptive densification
     # in standard 3DGS; we don't need it for forward, but the API requires it).
     means2D = torch.zeros_like(means3D, requires_grad=True)
+    if means2d_capture is not None:
+        means2d_capture.append(means2D)
     colors_precomp = params.color                                # (N, 3) in [0, 1]
     opacities = tc.alpha_eff.unsqueeze(-1)                       # (N, 1)
     sigma_3d_t = tc.Sigma_3D_t
