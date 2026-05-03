@@ -10,19 +10,21 @@ For each (3D point P_i, time t_i), we:
   6. Initialize covariance and opacity to small/moderate defaults.
   7. Sample color from the reference image if available.
 
-Why rays from a specific camera? As we saw in Phase 3, a line through the
-CAMERA ORIGIN has c = 1, s = 0 -- e2_hat is purely temporal. No spatial drift.
-For static cameras, this means the Gaussian sits exactly on the ray it was
-initialized on, and any spatial motion in the scene must be learned via
-sigma_ab + appropriate Gaussian density.
+Init strategies (passed via `strategy` arg):
+- "lookat" (default, legacy): ref cam = camera most directly facing the point.
+- "birth": ref cam = first frame that observes the point.
+- "median": ref cam = median observed frame. Recommended for monocular orbits
+  (e.g. DyCheck), where it minimizes the worst-case angle between the
+  initialized ray and any other rendering frame.
+- "random": skip the ray geometry. Sample (p, q) ~ Uniform(S^2 x S^2). Lets
+  training discover orientations; the ref-cam debate doesn't apply.
 
-We use each point's CLOSEST camera (smallest angle to the ray) as the reference,
-which gives the ray best aligned with the point's natural line of sight and is
-most robust to small errors in the triangulated 3D position.
+The "birth" / "median" strategies require an observability list per point
+(see grassmann.datasets.MonocularDataset). The "lookat" strategy does not.
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import Literal, Optional
 
 import numpy as np
 import torch
@@ -37,17 +39,38 @@ from .gaussian import GaussianParams
 DTYPE = torch.float64
 
 
-def pick_reference_camera(X_world: Tensor, cameras: list[Camera]) -> int:
-    """Return the index of the camera that most directly faces X_world.
+InitStrategy = Literal["lookat", "birth", "median", "random"]
 
-    Criterion: maximize dot(forward_k, (X - c_k).normalized()). This is the
-    camera whose optical axis is most aligned with the line-of-sight to the
-    point.
+
+def pick_reference_camera(
+    X_world: Tensor,
+    cameras: list[Camera],
+    *,
+    strategy: InitStrategy = "lookat",
+    observability_idx: Optional[list[int]] = None,
+) -> int:
+    """Pick a reference camera index for ray-init.
+
+    - "lookat":  camera most directly facing X_world (legacy; uses cameras only).
+    - "birth":   first frame in observability_idx (fallback: 0).
+    - "median":  middle frame in observability_idx (fallback: len(cameras)//2).
+    - "random":  not handled here; the caller should bypass ray-init entirely.
     """
+    if strategy == "birth":
+        if observability_idx:
+            return int(observability_idx[0])
+        return 0
+    if strategy == "median":
+        if observability_idx:
+            return int(observability_idx[len(observability_idx) // 2])
+        return len(cameras) // 2
+    if strategy == "random":
+        raise ValueError("'random' strategy bypasses ref-cam selection; the caller "
+                         "must handle it directly in init_gaussian_from_point.")
+    # "lookat" (legacy)
     best_idx = 0
     best_score = -float("inf")
     for k, cam in enumerate(cameras):
-        # Forward direction in world coords = R^T @ (0, 0, 1) = R[2, :] (third row of R).
         forward_world = cam.R[2]
         dir_to_pt = X_world - cam.c
         dir_to_pt = dir_to_pt / dir_to_pt.norm().clamp_min(1e-12)
@@ -58,6 +81,22 @@ def pick_reference_camera(X_world: Tensor, cameras: list[Camera]) -> int:
     return best_idx
 
 
+def _random_pq() -> tuple[Tensor, Tensor]:
+    """Sample (p, q) uniformly on S^2 x S^2 (as imaginary quaternions).
+    Reject samples with p . q <= -0.5 to avoid the antidiagonal singularity."""
+    while True:
+        p3 = torch.randn(3, dtype=DTYPE)
+        q3 = torch.randn(3, dtype=DTYPE)
+        p3 = p3 / p3.norm().clamp_min(1e-12)
+        q3 = q3 / q3.norm().clamp_min(1e-12)
+        if float((p3 * q3).sum().item()) > -0.5:
+            break
+    # Embed as full quaternions (real = 0).
+    p = torch.cat([torch.zeros(1, dtype=DTYPE), p3]).unsqueeze(0)   # (1, 4)
+    q = torch.cat([torch.zeros(1, dtype=DTYPE), q3]).unsqueeze(0)
+    return p, q
+
+
 def init_gaussian_from_point(
     X_world: Tensor,
     t: float,
@@ -65,6 +104,8 @@ def init_gaussian_from_point(
     *,
     color: Optional[Tensor] = None,
     ref_cam_idx: Optional[int] = None,
+    strategy: InitStrategy = "lookat",
+    observability_idx: Optional[list[int]] = None,
     sigma_aa: float = 0.02,
     sigma_bb: float = 0.05,
     sigma_ab: float = 0.0,
@@ -76,10 +117,13 @@ def init_gaussian_from_point(
 
     X_world: (3,)
     t:       scalar
-    cameras: list of K cameras
+    cameras: list of K cameras (or T per-frame cameras for monocular)
     color:   (3,) in [0, 1]; defaults to mid-gray.
-    ref_cam_idx: which camera to build the ray from. Defaults to the
-                 most-directly-facing camera.
+    ref_cam_idx:        which camera to build the ray from. If None and strategy
+                        is not "random", it is selected via pick_reference_camera.
+    strategy:           "lookat" | "birth" | "median" | "random". See module docstring.
+    observability_idx:  list of frame indices observing this point (used for
+                        "birth" / "median").
 
     sigma_aa: variance along alpha (radial, along the ray). Controls how
               thick the Gaussian is in depth.
@@ -96,8 +140,43 @@ def init_gaussian_from_point(
     """
     if color is None:
         color = torch.full((3,), 0.5, dtype=DTYPE)
+
+    # Cholesky of Sigma_k. Needed for both ray-init and random branches.
+    sa = np.sqrt(sigma_aa)
+    L10 = sigma_ab / sa
+    inner = sigma_bb - sigma_ab * sigma_ab / sigma_aa
+    if inner <= 0:
+        raise ValueError(f"Invalid Sigma_k (not PD): inner = {inner}")
+    L11 = np.sqrt(inner)
+    L = torch.tensor([[[sa, 0.0], [L10, L11]]], dtype=DTYPE)
+
+    # --- Random strategy: bypass ref-cam ray geometry ---
+    if strategy == "random":
+        p_quat, q_quat = _random_pq()
+        e1_hat, e2_hat = G.orthonormal_basis(p_quat, q_quat)
+        target = torch.cat(
+            [torch.tensor([[float(t)]], dtype=DTYPE), X_world.unsqueeze(0)], dim=-1
+        )
+        alpha_val = (target * e1_hat).sum(dim=-1)
+        beta_val = (target * e2_hat).sum(dim=-1)
+        return GaussianParams(
+            p_im=Q.imag(p_quat),
+            q_im=Q.imag(q_quat),
+            alpha_0=alpha_val,
+            beta_0=beta_val,
+            L=L,
+            opacity=torch.tensor([opacity], dtype=DTYPE),
+            color=color.unsqueeze(0),
+            sigma_k_pixel=sigma_k_pixel,
+            sigma_k_temporal=sigma_k_temporal,
+        )
+
+    # --- Ray-init strategies ---
     if ref_cam_idx is None:
-        ref_cam_idx = pick_reference_camera(X_world, cameras)
+        ref_cam_idx = pick_reference_camera(
+            X_world, cameras,
+            strategy=strategy, observability_idx=observability_idx,
+        )
 
     ref_cam = cameras[ref_cam_idx]
 
@@ -149,15 +228,6 @@ def init_gaussian_from_point(
     alpha_val = (target * e1_hat).sum(dim=-1)                               # (1,)
     beta_val = (target * e2_hat).sum(dim=-1)                                # (1,)
 
-    # Cholesky of Sigma_k.
-    sa = np.sqrt(sigma_aa)
-    L10 = sigma_ab / sa
-    inner = sigma_bb - sigma_ab * sigma_ab / sigma_aa
-    if inner <= 0:
-        raise ValueError(f"Invalid Sigma_k (not PD): inner = {inner}")
-    L11 = np.sqrt(inner)
-    L = torch.tensor([[[sa, 0.0], [L10, L11]]], dtype=DTYPE)
-
     return GaussianParams(
         p_im=Q.imag(p_quat),
         q_im=Q.imag(q_quat),
@@ -177,6 +247,8 @@ def init_gaussians_from_points(
     cameras: list[Camera],
     *,
     colors: Optional[Tensor] = None,   # (N, 3)
+    strategy: InitStrategy = "lookat",
+    observability: Optional[list[list[int]]] = None,  # length N (per-point frame lists)
     sigma_aa: float = 0.02,
     sigma_bb: float = 0.05,
     sigma_ab: float = 0.0,
@@ -188,15 +260,24 @@ def init_gaussians_from_points(
 
     Each row (points[i], times[i]) becomes one Gaussian.
     Returns a single GaussianParams containing all N Gaussians.
+
+    `strategy` and `observability` are passed through to init_gaussian_from_point;
+    see its docstring for the strategy semantics.
     """
     N = points.shape[0]
     if colors is None:
         colors = torch.full((N, 3), 0.5, dtype=DTYPE)
+    if observability is not None and len(observability) != N:
+        raise ValueError(
+            f"observability has length {len(observability)} but expected N={N}"
+        )
 
     per_gaussian = [
         init_gaussian_from_point(
             points[i], float(times[i].item()), cameras,
             color=colors[i],
+            strategy=strategy,
+            observability_idx=(observability[i] if observability is not None else None),
             sigma_aa=sigma_aa, sigma_bb=sigma_bb, sigma_ab=sigma_ab,
             opacity=opacity,
             sigma_k_pixel=sigma_k_pixel,
