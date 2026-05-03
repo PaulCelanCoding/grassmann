@@ -364,6 +364,118 @@ in `grassmann/training.py` as `TrainerConfig.lr_decay` with `--lr_decay`
 CLI flag in `train_mono.py` and `--lr-decay` in `train_modal.py`. Default
 1.0 preserves prior behavior; 0.01 reproduces this probe. ~15 LOC.
 
+## §9. Mechanistic RCA of the 1.37 dB residual
+
+After §7+§8 narrowed the candidate list, three diagnostic analyses on the
+existing checkpoints + renders (no new training) localized the residual.
+
+### 9a. Per-pixel error decomposition (edge vs flat regions)
+
+Sobel-based edge mask (top 15% gradient magnitude) on each GT, compared L1
+errors of ours-best (SH3 30k+LRdecay) vs D3DGS over 82 val frames:
+
+| region | ours-best L1 | D3DGS L1 | ratio |
+|---|---|---|---|
+| edges (top 15% Sobel) | 0.068 | 0.061 | **1.11×** |
+| flat (bottom 85%) | 0.021 | 0.018 | **1.17×** |
+
+The deficit is **uniform-to-flat-biased**, not edge-concentrated. Rules out
+"D3DGS wins by placing more Gaussians at object boundaries"; the gap lives
+in the rendering of flat/textured surfaces, not at coverage gaps.
+
+### 9b. Radial FFT power spectrum (high-frequency loss)
+
+Mean radial luminance power spectrum over 82 val frames (luminance =
+0.299R + 0.587G + 0.114B → 2D FFT → radially averaged):
+
+| method | high-freq power loss vs GT (band: top half of frequencies) |
+|---|---|
+| ours SH3 14k baseline | −5.03 dB |
+| D3DGS | −2.74 dB |
+| **delta (ours minus D3DGS)** | **−2.29 dB more HF loss** |
+
+Our renders systematically lose high-frequency content. This is the
+spectral signature of **larger Gaussians acting as stronger low-pass
+filters** (Gaussian kernel of std σ has a Fourier transform falling off
+as exp(-σ²k²/2); larger σ = sharper roll-off).
+
+Plot: `docs/issues/rca_residual_fft.png`
+
+### 9c. Gaussian size distribution (ours vs D3DGS PLY)
+
+Pulled D3DGS's iso14k checkpoint PLY and compared per-Gaussian scales.
+Coordinate frames differ (D3DGS auto-normalizes scene to ~unit cube, ours
+uses raw NeRFies coords with extent ~30), so coordinate-system-invariant
+comparison projects each Gaussian to *screen space pixels* through the
+same camera (frame 100, fx=214.5, scale 8 image 240×134):
+
+| metric | ours (median, pixels) | D3DGS (median, pixels) | ratio |
+|---|---|---|---|
+| smallest axis (projected std) | 0.169 | 0.092 | **1.84×** |
+| largest axis (projected std) | 4.36 | 2.60 | **1.68×** |
+| ε I numerical floor | 0.169 px | — | (= our smallest) |
+| **fraction of D3DGS below our floor** | — | **59.1 %** | — |
+| Gaussian count | 37 840 | 186 340 | D3DGS 4.9× more |
+
+The ratio is "modest" in the median (~1.8×), but the **distribution
+shape** differs sharply: D3DGS has a heavy tail of sub-pixel Gaussians
+(p25 = 0.015 px, p50 = 0.092 px, p75 = 0.59 px) while ours hits a hard
+floor at √ε ≈ 0.17 px. **Over half of D3DGS's Gaussians are thinner than
+the smallest Gaussian our parameterization can produce.** Plot:
+`docs/issues/rca_residual_size_dist.png`
+
+### Synthesis: rank-2 + ε I sets a representation floor
+
+The three analyses converge on a single mechanism:
+
+1. Our 3-plane projector parameterization makes Σ_3D(t_0) **rank-2 by
+   construction** (a disk in 3D, no extent along n̂).
+2. The CUDA EWA needs an invertible 3×3, so we lift with `ε I` where
+   ε = `sigma_3d_blur` = 1e-4. This is a **hard floor** on the smallest
+   axis: σ_min ≥ √ε ≈ 0.01 in scene units.
+3. D3DGS's `(scales, rotations)` parameterization has **no floor**: 88.8 %
+   of its Gaussians are thinner than our floor allows ours to be.
+4. Larger smallest axis → broader spatial kernel → low-pass filtering
+   (§9b shows −2.29 dB extra HF loss).
+5. Low-pass filtering is **content-independent and spatially uniform**,
+   matching §9a (1.11×/1.17× edge/flat ratios — basically equal).
+
+This explains why §7's `sigma_3d_blur` ±10× sweep was symmetric and gave
+−0.29 dB both ways: ε is bounded below by numerical stability, and any
+ε > the natural Gaussian-thickness floor degrades quality without further
+helping invertibility.
+
+### Implication for the next probe
+
+The remaining 1.37 dB sits in the rank-2 representation itself, not in
+hyperparameters around it. Three architectural directions:
+
+1. **Switch to explicit `(scales, rotations)`** (the change called out in
+   the takeover prompt). Re-parameterize `TrainableGaussians` to learn
+   per-Gaussian (scale_0, scale_1, scale_2, quaternion) instead of L_raw,
+   bypass the projector, feed directly to `diff-gaussian-rasterization`.
+   Loses the 3-plane G(3,4) story but tests whether the parameterization
+   is the residual lever. **This is the structurally informative probe.**
+2. **Reduce `spatial_split_threshold`** by 10-100×. Currently 0.05 in
+   our raw scene units² (= 0.22 std-dev in scene units, i.e. our largest-
+   axis median is at 0.27 — so the cap is binding). The user has run a
+   `grad-thr` sweep that was null/negative (memory:
+   `project_grassmann_phaseC_residual_14k`), but `spatial_split_threshold`
+   specifically may not have been swept. **Cheap CLI test (~$0.07).**
+3. **Match D3DGS scene normalization.** Auto-rescale cameras + points to
+   a unit cube before training, so our threshold and ε I have the same
+   *relative* scale they have in D3DGS. Minor code change. Won't fix the
+   rank-2 floor but should reduce the size mismatch.
+
+Probe #2 is the cheapest test before committing to (1). If it moves
+PSNR by >0.3 dB, the issue was hyperparameter scale; if not, the rank-2
+floor is the binding constraint and (1) is required.
+
+Files:
+- `docs/issues/rca_residual_fft.png` — radial power spectrum
+- `docs/issues/rca_residual_size_dist.png` — size histograms
+- `/tmp/residual_decomp.json` — edge/flat L1 + HF loss numbers
+
 ## Files
 
 - `/tmp/perframe_apples.json` — per-frame PSNR/L1 (raw)
