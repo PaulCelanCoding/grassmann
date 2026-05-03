@@ -11,16 +11,15 @@ One-time data upload (from repo root):
   modal volume put gs-mono ./data/dycheck/<scene>  /<scene>
 
 Usage:
-  modal run scripts/train_modal.py --cmd smoke   --dataset nerfies --scene <scene>
-  modal run scripts/train_modal.py --cmd train   --dataset nerfies --scene <scene> --iters 30000
-  modal run scripts/train_modal.py --cmd train   --dataset dycheck --scene <scene> --split train
-  modal run scripts/train_modal.py --cmd sanity  --scene <scene>
+  modal run scripts/train_modal.py --cmd smoke --dataset nerfies --scene <scene>
+  modal run scripts/train_modal.py --cmd train --dataset nerfies --scene <scene> --iters 30000
+  modal run scripts/train_modal.py --cmd train --dataset dycheck --scene <scene> --split train
 
 Smoke = train with --num_iters 100 --image_scale 4 to validate the
 entire Modal + CUDA + data path before committing GPU-hours to a real run.
 
-The legacy N3DV/multi-camera entrypoint lives at
-legacy/multi_camera/scripts/train_modal_n3dv.py (volume: gs-n3dv).
+The legacy N3DV/multi-camera training scripts (incl. the single-Gaussian
+sanity check) live under legacy/multi_camera/scripts/.
 """
 import subprocess
 from pathlib import Path
@@ -93,17 +92,6 @@ def train(
     ckpt_vol.commit()
 
 
-@app.function(gpu=GPU, volumes=VOLUMES, timeout=3600)
-def sanity(scene: str) -> None:
-    """Single-Gaussian sanity render. Currently uses the multi-camera
-    sanity script; will be ported to the monocular path in a follow-up."""
-    _run([
-        "python", "scripts/sanity_one_gaussian.py",
-        "--scene_dir", f"/data/{scene}",
-    ])
-    ckpt_vol.commit()
-
-
 @app.local_entrypoint()
 def main(
     cmd: str = "smoke",
@@ -126,7 +114,5 @@ def main(
             num_iters=iters, image_scale=2, use_fast=True,
             init_strategy=init_strategy, split=split_arg,
         )
-    elif cmd == "sanity":
-        sanity.remote(scene=scene)
     else:
-        raise SystemExit(f"unknown --cmd {cmd!r}; expected smoke|train|sanity")
+        raise SystemExit(f"unknown --cmd {cmd!r}; expected smoke|train")

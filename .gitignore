@@ -24,7 +24,11 @@ env/
 
 # Datasets / heavy artifacts
 data/n3dv/*/
+data/nerfies/*/
+data/dycheck/*/
 !data/n3dv/.gitkeep
+!data/nerfies/.gitkeep
+!data/dycheck/.gitkeep
 *.mp4
 *.mov
 *.npy
