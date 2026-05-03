@@ -183,6 +183,8 @@ def condition_on_time(
     params: GaussianParams,
     derived: DerivedQuantities,
     t_0: float,
+    *,
+    static: bool = False,
 ) -> TimeConditioned:
     """Per-frame conditioning at time t_0 (Schur complement on the time axis).
 
@@ -196,7 +198,25 @@ def condition_on_time(
     Sigma_tt = sigma_tt_pure + sigma_k_temporal is used only for the
     temporal weight w_t to keep the fall-off well-behaved when n is
     near-aligned with the time axis (degenerate, sigma_tt_pure -> 0).
+
+    `static=True` disables ALL temporal coupling: V_3D_t = V_k (no Schur
+    shift), Sigma_3D_t = Sigma_3D (no Schur shrinkage), w_t = 1 (every
+    Gaussian visible at every frame, regardless of v_0). This collapses
+    the 3-plane model to a static-3DGS-on-monocular-bundle baseline --
+    Gaussians must explain every frame simultaneously, with no
+    per-frame parameters. The L1 floor of this run measures "what static
+    3DGS achieves if you ignore the scene's motion"; the gap to the
+    full temporal run measures the value of time conditioning.
     """
+    if static:
+        ones = torch.ones_like(derived.v_0)
+        return TimeConditioned(
+            V_3D_t=derived.V_k,
+            Sigma_3D_t=derived.Sigma_3D,
+            alpha_eff=params.opacity,           # w_t = 1
+            w_t=ones,
+        )
+
     dt = t_0 - derived.v_0                                      # (N,)
 
     sigma_tt_pure = getattr(derived, "_sigma_tt_pure", derived.Sigma_tt)

@@ -197,6 +197,7 @@ def fast_rasterize(
     config: Optional[FastRasterConfig] = None,
     force_fallback: bool = False,
     means2d_capture: Optional[list] = None,
+    static_baseline: bool = False,
 ) -> Tensor:
     """Render the current model using the CUDA 3DGS rasterizer if available,
     otherwise fall back to our toy rasterizer.
@@ -224,7 +225,7 @@ def fast_rasterize(
 
     # Always compute the derived + time-conditioned quantities.
     derived = compute_derived(params)
-    tc = condition_on_time(params, derived, t_0)
+    tc = condition_on_time(params, derived, t_0, static=static_baseline)
 
     use_fast = (not force_fallback) and is_available() and params.n.is_cuda
 

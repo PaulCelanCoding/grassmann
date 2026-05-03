@@ -26,7 +26,7 @@ import torch
 from torch import Tensor
 
 from .gaussian import compute_derived, condition_on_time
-from .losses import l1_loss, photometric_loss, LPIPSLoss
+from .losses import l1_loss, mse_loss, photometric_loss, LPIPSLoss
 from .projection import Camera
 from .rasterizer import project_to_screen, rasterize
 from .trainable import TrainableGaussians, build_optimizer
@@ -61,6 +61,8 @@ class TrainerConfig:
     validation_cams: Optional[list[int]] = None  # which camera indices to evaluate on
     validation_times: Optional[list[float]] = None  # which times
     validation_frames: Optional[list[int]] = None  # monocular: which frame indices
+    train_frames: Optional[list[int]] = None       # monocular: restrict train sampling to this subset
+                                                   # (defaults to all T frames if None)
     # Density control (Phase 6)
     densify_every: int = 0            # 0 = disabled
     densify_start: int = 500          # don't start densification before this iteration
@@ -71,6 +73,11 @@ class TrainerConfig:
     fast_raster_config: Optional[FastRasterConfig] = None  # defaults built if None
     # Sampling mode
     monocular: bool = False  # True -> cameras list is per-frame; t_idx == cam_idx; one sample per step
+    # Static baseline: disable time conditioning entirely (Schur step skipped,
+    # w_t=1 always). Used to measure the "static-3DGS-on-monocular-bundle" floor
+    # within the same pipeline. The gap between this and the full temporal run
+    # quantifies the value of time conditioning.
+    static_baseline: bool = False
 
 
 FrameData = Union[Tensor, Callable[[int, float], Tensor]]
@@ -137,7 +144,7 @@ class Trainer:
                 print(f"  [warning] LPIPS disabled: {e}")
                 self.lpips_fn = None
 
-        self.history: dict[str, list] = {"iter": [], "loss": [], "l1": [], "N": []}
+        self.history: dict[str, list] = {"iter": [], "loss": [], "l1": [], "psnr": [], "N": []}
 
     # def get_frame(self, cam_idx: int, t_idx: int) -> Tensor:
     #     """Get the target frame for camera cam_idx at time index t_idx."""
@@ -164,19 +171,22 @@ class Trainer:
             return fast_rasterize(
                 params, t_value, self.cameras[cam_idx], self.H, self.W,
                 background=bg, config=fc,
+                static_baseline=self.config.static_baseline,
             )
         # Fallback: toy rasterizer path (also used when no GPU or no extension).
         derived = compute_derived(params)
-        tc = condition_on_time(params, derived, t_value)
+        tc = condition_on_time(params, derived, t_value, static=self.config.static_baseline)
         sg = project_to_screen(params, tc, self.cameras[cam_idx])
         return rasterize(sg, H=self.H, W=self.W, background=bg)
 
-    def train_step(self) -> tuple[float, float]:
-        """One stochastic training step. Returns (total loss, L1 component)."""
+    def train_step(self) -> tuple[float, float, float]:
+        """One stochastic training step. Returns (total loss, L1, PSNR_dB)."""
         # Sample a frame.
         if self.config.monocular:
             # Monocular: one camera per frame, sampled together. self.K must equal self.T.
-            t_idx = torch.randint(0, self.T, (1,)).item()
+            train_pool = self.config.train_frames if self.config.train_frames else list(range(self.T))
+            pick = torch.randint(0, len(train_pool), (1,)).item()
+            t_idx = int(train_pool[pick])
             cam_idx = t_idx
         else:
             cam_idx = torch.randint(0, self.K, (1,)).item()
@@ -195,7 +205,10 @@ class Trainer:
             lpips_fn=self.lpips_fn,
             lambda_lpips=self.config.lambda_lpips,
         )
-        l1_val = l1_loss(rendered, target).item()
+        with torch.no_grad():
+            l1_val = l1_loss(rendered, target).item()
+            mse_val = mse_loss(rendered, target).item()
+            psnr_val = 10.0 * float(torch.log10(torch.tensor(max(mse_val, 1e-12)).reciprocal()))
 
         # Backprop.
         self.optimizer.zero_grad()
@@ -207,7 +220,7 @@ class Trainer:
 
         self.optimizer.step()
 
-        return loss.item(), l1_val
+        return loss.item(), l1_val, psnr_val
 
     def renormalize_manifolds(self) -> None:
         """Re-project n_raw onto S^3 (cheap maintenance step)."""
@@ -222,6 +235,7 @@ class Trainer:
         Multi-cam (legacy): iterate over `validation_cams x validation_times`.
         """
         total_l1 = 0.0
+        total_mse = 0.0
         count = 0
         with torch.no_grad():
             if self.config.monocular:
@@ -237,6 +251,7 @@ class Trainer:
                     target = self.get_frame(t_idx, t_idx).to(self.model.n_raw.dtype)
                     rendered = self.render_one(t_idx, t_value)
                     total_l1 += l1_loss(rendered, target).item()
+                    total_mse += mse_loss(rendered, target).item()
                     count += 1
             else:
                 cam_indices = self.config.validation_cams or list(range(self.K))
@@ -250,8 +265,12 @@ class Trainer:
                         target = self.get_frame(cam_idx, t_frame_idx).to(self.model.n_raw.dtype)
                         rendered = self.render_one(cam_idx, t_value)
                         total_l1 += l1_loss(rendered, target).item()
+                        total_mse += mse_loss(rendered, target).item()
                         count += 1
-        return {"val_l1": total_l1 / max(count, 1)}
+        n = max(count, 1)
+        avg_mse = total_mse / n
+        avg_psnr = 10.0 * float(torch.log10(torch.tensor(max(avg_mse, 1e-12)).reciprocal()))
+        return {"val_l1": total_l1 / n, "val_psnr": avg_psnr}
 
     def train(self, num_iters: Optional[int] = None, log_every: Optional[int] = None,
               callback: Optional[Callable[[int, dict], None]] = None) -> dict:
@@ -265,10 +284,12 @@ class Trainer:
 
         running_loss = 0.0
         running_l1 = 0.0
+        running_psnr = 0.0
         for i in range(1, n + 1):
-            loss_val, l1_val = self.train_step()
+            loss_val, l1_val, psnr_val = self.train_step()
             running_loss += loss_val
             running_l1 += l1_val
+            running_psnr += psnr_val
 
             if i % self.config.renormalize_every == 0:
                 self.renormalize_manifolds()
@@ -288,24 +309,30 @@ class Trainer:
             if i % le == 0:
                 avg_loss = running_loss / le
                 avg_l1 = running_l1 / le
+                avg_psnr = running_psnr / le
                 self.history["iter"].append(i)
                 self.history["loss"].append(avg_loss)
                 self.history["l1"].append(avg_l1)
+                self.history["psnr"].append(avg_psnr)
                 self.history["N"].append(self.model.N)
-                info = {"iter": i, "loss": avg_loss, "l1": avg_l1, "N": self.model.N}
+                info = {"iter": i, "loss": avg_loss, "l1": avg_l1,
+                        "psnr": avg_psnr, "N": self.model.N}
 
                 # Optional validation.
                 if self.config.validation_every > 0 and (i % self.config.validation_every == 0):
                     val = self.validate()
                     info.update(val)
 
-                print(f"  iter {i:5d}: loss={avg_loss:.4f}  l1={avg_l1:.4f}  N={self.model.N}"
-                      + (f"  val_l1={info.get('val_l1', float('nan')):.4f}" if "val_l1" in info else ""))
+                print(f"  iter {i:5d}: loss={avg_loss:.4f}  l1={avg_l1:.4f}  "
+                      f"psnr={avg_psnr:.2f}dB  N={self.model.N}"
+                      + (f"  val_l1={info.get('val_l1', float('nan')):.4f}" if "val_l1" in info else "")
+                      + (f"  val_psnr={info.get('val_psnr', float('nan')):.2f}dB" if "val_psnr" in info else ""))
                 if callback is not None:
                     callback(i, info)
 
                 running_loss = 0.0
                 running_l1 = 0.0
+                running_psnr = 0.0
 
         return self.history
 

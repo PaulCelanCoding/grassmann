@@ -120,6 +120,8 @@ def train(
     sigma_init_sq: float,
     run_tag: str,
     seed: int | None,
+    static_baseline: bool,
+    val_stride: int,
 ) -> None:
     scene_dir = _ensure_scene_unpacked(scene)
     suffix = f"-{run_tag}" if run_tag else ""
@@ -144,6 +146,9 @@ def train(
         argv.append("--allow_distortion")
     if seed is not None:
         argv += ["--seed", str(seed)]
+    if static_baseline:
+        argv.append("--static_baseline")
+    argv += ["--val_stride", str(val_stride)]
     _run(argv)
     ckpt_vol.commit()
 
@@ -207,6 +212,8 @@ def main(
     sigma_init_sq: float = 0.02,
     run_tag: str = "",
     seed: int = -1,
+    static_baseline: bool = False,
+    val_stride: int = 4,
 ):
     """
     --cmd smoke:  short run (--iters used; default 500) at scale 4. Validates
@@ -227,6 +234,8 @@ def main(
             sigma_init_sq=sigma_init_sq,
             run_tag=run_tag,
             seed=seed_arg,
+            static_baseline=static_baseline,
+            val_stride=val_stride,
         )
     elif cmd == "train":
         train.remote(
@@ -240,6 +249,8 @@ def main(
             sigma_init_sq=sigma_init_sq,
             run_tag=run_tag,
             seed=seed_arg,
+            static_baseline=static_baseline,
+            val_stride=val_stride,
         )
     elif cmd == "render":
         if not ckpt:

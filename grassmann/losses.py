@@ -31,6 +31,20 @@ def l1_loss(rendered: Tensor, target: Tensor) -> Tensor:
     return (rendered - target).abs().mean()
 
 
+def mse_loss(rendered: Tensor, target: Tensor) -> Tensor:
+    """Mean squared error. Both tensors same shape, values in [0, 1]."""
+    return ((rendered - target) ** 2).mean()
+
+
+def psnr(rendered: Tensor, target: Tensor) -> Tensor:
+    """Peak signal-to-noise ratio in dB, assuming inputs in [0, 1] (max=1).
+
+    PSNR = 10 * log10(MAX^2 / MSE). Returns a scalar tensor.
+    """
+    mse = mse_loss(rendered, target).clamp_min(1e-12)
+    return 10.0 * torch.log10(1.0 / mse)
+
+
 # ---- Structural loss: a cheap SSIM substitute --------------------------------
 
 def _to_bchw(img: Tensor) -> Tensor:

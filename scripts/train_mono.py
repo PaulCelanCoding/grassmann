@@ -99,6 +99,15 @@ def main():
                          "Phase A: must be 0 (DC targets the legacy 2-plane param).")
     ap.add_argument("--seed", type=int, default=None,
                     help="Optional seed for the random initialization (n, L_raw).")
+    ap.add_argument("--static_baseline", action="store_true",
+                    help="Disable time conditioning (Schur step skipped, w_t=1 always). "
+                         "Establishes the static-3DGS-on-monocular-bundle floor within the "
+                         "same pipeline; gap to the full temporal run = value of time conditioning.")
+    ap.add_argument("--val_stride", type=int, default=4,
+                    help="If the loaded dataset has no val_ids (e.g. HyperNeRF interp split "
+                         "ships with val_ids=[]), construct a held-out split by taking every "
+                         "Nth frame. DyGauBench convention for HyperNeRF interp = 4 (248 train "
+                         "/ 82 val for 330-frame slice-banana). 0 disables val-split injection.")
     args = ap.parse_args()
 
     if args.densify_every != 0:
@@ -115,6 +124,17 @@ def main():
     )
     print(f"  T={ds.T}, points={ds.N_points}, H={ds.H}, W={ds.W}, "
           f"train={len(ds.train_indices)}, val={len(ds.val_indices)}")
+
+    # If the dataset ships with no val split (HyperNeRF interp ships with
+    # val_ids=[]), construct one by holding out every val_stride-th frame.
+    # DyGauBench convention for HyperNeRF interp = stride 4.
+    val_indices_override = None
+    if args.val_stride > 0 and len(ds.val_indices) == 0:
+        held_out = list(range(0, ds.T, args.val_stride))
+        val_indices_override = held_out
+        train_idx_after = [i for i in range(ds.T) if i not in set(held_out)]
+        print(f"  [val_stride={args.val_stride}] dataset ships no val split; constructing "
+              f"held-out: train={len(train_idx_after)}, val={len(held_out)}")
 
     # Initialize one Gaussian per scene point. Pick a temporal mean per point
     # from the median-observed frame's normalized time (sensible for static
@@ -144,7 +164,7 @@ def main():
     model = trainable_from_params(params, dtype=DTYPE, device=device)
     print(f"  Model: {model.N} Gaussians on {device}")
 
-    config = TrainerConfig(
+    cfg_kwargs = dict(
         num_iters=args.num_iters,
         log_every=args.log_every,
         lambda_l1=0.8,
@@ -156,7 +176,14 @@ def main():
         use_fast_rasterizer=args.use_fast_rasterizer,
         fast_raster_config=FastRasterConfig(sigma_3d_blur=args.sigma_3d_blur),
         validation_every=max(args.log_every, args.num_iters // 10),
+        static_baseline=args.static_baseline,
     )
+    if val_indices_override is not None:
+        cfg_kwargs["validation_frames"] = val_indices_override
+        cfg_kwargs["train_frames"] = [
+            i for i in range(ds.T) if i not in set(val_indices_override)
+        ]
+    config = TrainerConfig(**cfg_kwargs)
     trainer = Trainer.from_monocular_dataset(model, ds, config)
 
     print(f"Training for {args.num_iters} iterations...")
