@@ -164,6 +164,14 @@ def main():
     ap.add_argument("--lambda_aniso", type=float, default=0.0,
                     help="Bounded anisotropy penalty on Σ_3D(t_0). Trims the runaway "
                          "λ_max/λ_min tail. 0 disables. Recommended ≈1e-3 (small).")
+    ap.add_argument("--sh_degree", type=int, default=0,
+                    help="Spherical-harmonics band for per-Gaussian color. 0 keeps the "
+                         "legacy constant-RGB path (color_logit). >0 swaps in sh_dc + "
+                         "sh_rest with K=(degree+1)^2 coefficients/channel; the CUDA "
+                         "rasterizer evaluates SH against the per-Gaussian view direction. "
+                         "Standard 3DGS default is 3 (16 coeffs/channel). Requires "
+                         "--use_fast_rasterizer; the toy CPU rasterizer collapses to the "
+                         "DC term.")
     args = ap.parse_args()
 
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -254,8 +262,14 @@ def main():
         sigma_k_temporal=0.0,
         seed=args.seed,
     )
-    model = trainable_from_params(params, dtype=DTYPE, device=device)
-    print(f"  Model: {model.N} Gaussians on {device}")
+    model = trainable_from_params(
+        params, dtype=DTYPE, device=device, sh_degree=args.sh_degree,
+    )
+    if args.sh_degree > 0:
+        print(f"  Model: {model.N} Gaussians on {device} (SH degree {args.sh_degree}, "
+              f"{(args.sh_degree + 1) ** 2} coeffs/channel)")
+    else:
+        print(f"  Model: {model.N} Gaussians on {device}")
 
     cfg_kwargs = dict(
         num_iters=args.num_iters,
@@ -277,7 +291,10 @@ def main():
             scale_max=args.scale_max_prune,
         ),
         use_fast_rasterizer=args.use_fast_rasterizer,
-        fast_raster_config=FastRasterConfig(sigma_3d_blur=args.sigma_3d_blur),
+        fast_raster_config=FastRasterConfig(
+            sigma_3d_blur=args.sigma_3d_blur,
+            sh_degree=args.sh_degree,
+        ),
         validation_every=max(args.log_every, args.num_iters // 10),
         static_baseline=args.static_baseline,
         lambda_frob=args.lambda_frob,

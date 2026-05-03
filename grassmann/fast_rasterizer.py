@@ -279,7 +279,6 @@ def fast_rasterize(
     means2D = torch.zeros_like(means3D, requires_grad=True)
     if means2d_capture is not None:
         means2d_capture.append(means2D)
-    colors_precomp = params.color                                # (N, 3) in [0, 1]
     opacities = tc.alpha_eff.unsqueeze(-1)                       # (N, 1)
     sigma_3d_t = tc.Sigma_3D_t
     if config.sigma_3d_blur > 0.0:
@@ -287,12 +286,23 @@ def fast_rasterize(
         sigma_3d_t = sigma_3d_t + (config.sigma_3d_blur ** 2) * eye
     cov3D_precomp = sigma3d_to_cov6(sigma_3d_t)                  # (N, 6)
 
+    # Either feed precomputed RGB (sh_degree == 0 path) or per-Gaussian SH
+    # coefficients which the CUDA kernel evaluates against the per-Gaussian
+    # view direction.
+    use_sh = params.sh is not None and config.sh_degree > 0
+    if use_sh:
+        shs_in = params.sh                                       # (N, K, 3)
+        colors_precomp_in = None
+    else:
+        shs_in = None
+        colors_precomp_in = params.color                         # (N, 3) in [0, 1]
+
     # Call the CUDA kernel.
     rendered_image, radii = rasterizer(
         means3D=means3D,
         means2D=means2D,
-        shs=None,
-        colors_precomp=colors_precomp,
+        shs=shs_in,
+        colors_precomp=colors_precomp_in,
         opacities=opacities,
         scales=None,
         rotations=None,

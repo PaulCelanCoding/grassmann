@@ -135,6 +135,7 @@ def train(
     spatial_split_threshold: float,
     max_split_per_event: int,
     opacity_prune_threshold: float,
+    sh_degree: int,
 ) -> None:
     scene_dir = _ensure_scene_unpacked(scene)
     suffix = f"-{run_tag}" if run_tag else ""
@@ -181,6 +182,8 @@ def train(
                  "--opacity_prune_threshold", str(opacity_prune_threshold)]
         if max_split_per_event > 0:
             argv += ["--max_split_per_event", str(max_split_per_event)]
+    if sh_degree > 0:
+        argv += ["--sh_degree", str(sh_degree)]
     _run(argv)
     ckpt_vol.commit()
 
@@ -259,6 +262,7 @@ def main(
     spatial_split_threshold: float = 0.5,
     max_split_per_event: int = 0,
     opacity_prune_threshold: float = 1e-3,
+    sh_degree: int = 0,
 ):
     """
     --cmd smoke:  short run (--iters used; default 500) at scale 4. Validates
@@ -294,6 +298,7 @@ def main(
             spatial_split_threshold=spatial_split_threshold,
             max_split_per_event=max_split_per_event,
             opacity_prune_threshold=opacity_prune_threshold,
+            sh_degree=sh_degree,
         )
     elif cmd == "train":
         train.remote(
@@ -322,6 +327,7 @@ def main(
             spatial_split_threshold=spatial_split_threshold,
             max_split_per_event=max_split_per_event,
             opacity_prune_threshold=opacity_prune_threshold,
+            sh_degree=sh_degree,
         )
     elif cmd == "render":
         if not ckpt:

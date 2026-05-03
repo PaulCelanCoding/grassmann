@@ -47,11 +47,21 @@ from .gaussian import GaussianParams, compute_derived
 from .trainable import TrainableGaussians
 
 
-# Per-Gaussian parameters (3-plane param). Adam state on these must be
-# kept in lockstep with row-axis splits/prunes.
-_PER_GAUSSIAN_PARAMS = (
-    "n_raw", "L_raw", "mu", "opacity_logit", "color_logit",
-)
+# Geometry/opacity per-Gaussian params common to both color paths.
+_GEOMETRY_PARAMS = ("n_raw", "L_raw", "mu", "opacity_logit")
+
+
+def _per_gaussian_param_names(model: TrainableGaussians) -> tuple[str, ...]:
+    """Per-Gaussian nn.Parameter names actually present on the model.
+
+    Geometry/opacity are always present; the color appearance path is either
+    `color_logit` (sh_degree=0) or `sh_dc` + `sh_rest` (sh_degree>0). Adam
+    state on whichever set is present must be kept in lockstep with row-axis
+    splits/prunes.
+    """
+    if getattr(model, "sh_degree", 0) > 0:
+        return _GEOMETRY_PARAMS + ("sh_dc", "sh_rest")
+    return _GEOMETRY_PARAMS + ("color_logit",)
 
 
 @dataclass
@@ -162,7 +172,7 @@ class DensityTracker:
     def _keep_rows(self, keep_mask: Tensor) -> None:
         idx = torch.nonzero(keep_mask, as_tuple=True)[0]
         with torch.no_grad():
-            for name in _PER_GAUSSIAN_PARAMS:
+            for name in _per_gaussian_param_names(self.model):
                 old = getattr(self.model, name)
                 new = nn.Parameter(old.data[idx].contiguous())
                 setattr(self.model, name, new)
@@ -170,18 +180,15 @@ class DensityTracker:
         self.grad_accum = self.grad_accum[idx].contiguous()
         self.grad_counts = self.grad_counts[idx].contiguous()
 
-    def _append_rows(
-        self,
-        n_raw: Tensor, L_raw: Tensor, mu: Tensor,
-        opacity_logit: Tensor, color_logit: Tensor,
-    ) -> None:
-        new_data = {
-            "n_raw": n_raw, "L_raw": L_raw, "mu": mu,
-            "opacity_logit": opacity_logit, "color_logit": color_logit,
-        }
-        n_new = n_raw.shape[0]
+    def _append_rows(self, new_data: dict[str, Tensor]) -> None:
+        names = _per_gaussian_param_names(self.model)
+        missing = [n for n in names if n not in new_data]
+        if missing:
+            raise KeyError(f"_append_rows missing tensors for: {missing}")
+        first = new_data[names[0]]
+        n_new = first.shape[0]
         with torch.no_grad():
-            for name in _PER_GAUSSIAN_PARAMS:
+            for name in names:
                 old = getattr(self.model, name)
                 new = nn.Parameter(torch.cat([old.data, new_data[name]], dim=0).contiguous())
                 setattr(self.model, name, new)
@@ -269,15 +276,23 @@ class DensityTracker:
             n_raw_par = self.model.n_raw.data[idx]
             L_raw_par = self.model.L_raw.data[idx] / phi
             op_par = self.model.opacity_logit.data[idx]
-            col_par = self.model.color_logit.data[idx]
 
-            self._append_rows(
-                n_raw=torch.cat([n_raw_par, n_raw_par], dim=0),
-                L_raw=torch.cat([L_raw_par, L_raw_par], dim=0),
-                mu=torch.cat([mu_plus, mu_minus], dim=0),
-                opacity_logit=torch.cat([op_par, op_par], dim=0),
-                color_logit=torch.cat([col_par, col_par], dim=0),
-            )
+            new_rows: dict[str, Tensor] = {
+                "n_raw": torch.cat([n_raw_par, n_raw_par], dim=0),
+                "L_raw": torch.cat([L_raw_par, L_raw_par], dim=0),
+                "mu": torch.cat([mu_plus, mu_minus], dim=0),
+                "opacity_logit": torch.cat([op_par, op_par], dim=0),
+            }
+            if self.model.sh_degree == 0:
+                col_par = self.model.color_logit.data[idx]
+                new_rows["color_logit"] = torch.cat([col_par, col_par], dim=0)
+            else:
+                sh_dc_par = self.model.sh_dc.data[idx]
+                sh_rest_par = self.model.sh_rest.data[idx]
+                new_rows["sh_dc"] = torch.cat([sh_dc_par, sh_dc_par], dim=0)
+                new_rows["sh_rest"] = torch.cat([sh_rest_par, sh_rest_par], dim=0)
+
+            self._append_rows(new_rows)
 
             keep_mask = torch.ones(self.model.N, dtype=torch.bool, device=mu_par.device)
             keep_mask[idx] = False

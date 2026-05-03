@@ -10,7 +10,8 @@ Each Gaussian is parameterized by:
   * mu in R^4                (mean in space-time; component along n is invisible
                               after projection -> 3 effective DOF)
   * opacity in [0, 1]
-  * color   in R^3
+  * color   in R^3           (constant RGB; used at sh_degree=0)
+  * sh      in R^(K, 3)      (optional, K=(sh_degree+1)^2; used at sh_degree>0)
   * sigma_k_pixel    scalar  (rasterizer EWA blur)
   * sigma_k_temporal scalar  (additive temporal smoothing for w_t only)
 
@@ -48,9 +49,42 @@ view-axis-pinning pathology by construction.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 import torch
 from torch import Tensor
+
+
+# SH band-0 normalization constant (Y_00 = 1 / (2*sqrt(pi))). The CUDA SH
+# evaluator uses the convention `radiance = SH(coeffs, dir) + 0.5`, so the
+# DC term `sh_dc` initialized from RGB is `(rgb - 0.5) / SH0`.
+SH0 = 0.28209479177387814
+
+
+def num_sh_coeffs(sh_degree: int) -> int:
+    """Number of SH coefficients for a given band degree: (degree+1)^2."""
+    return (sh_degree + 1) ** 2
+
+
+def rgb_to_sh_dc(rgb: Tensor) -> Tensor:
+    """Convert RGB in [0, 1] to the SH band-0 (DC) coefficient expected by
+    the 3DGS-style CUDA rasterizer.
+
+    Inverse of `radiance ~ SH0 * sh_dc + 0.5`, so `sh_dc = (rgb - 0.5) / SH0`.
+    Input shape: (..., 3). Output shape: (..., 1, 3).
+    """
+    return ((rgb - 0.5) / SH0).unsqueeze(-2)
+
+
+def sh_dc_to_rgb(sh_dc: Tensor) -> Tensor:
+    """Inverse of rgb_to_sh_dc — map SH band-0 coefficient back to display RGB.
+
+    Used by the toy CPU rasterizer fallback (which can't evaluate the full
+    SH-vs-direction expansion) and for visualization. Clamps to [0, 1].
+    """
+    if sh_dc.dim() < 2:
+        raise ValueError(f"sh_dc must have shape (..., 1, 3); got {tuple(sh_dc.shape)}")
+    return (sh_dc[..., 0, :] * SH0 + 0.5).clamp(0.0, 1.0)
 
 
 @dataclass
@@ -78,6 +112,8 @@ class GaussianParams:
     color: Tensor                   # (N, 3)
     sigma_k_pixel: float = 1.0
     sigma_k_temporal: float = 0.0
+    sh: Optional[Tensor] = None     # (N, K, 3) where K=(sh_degree+1)^2; None at sh_degree=0
+    sh_degree: int = 0              # 0 → use color; >0 → use sh
 
     @property
     def N(self) -> int:

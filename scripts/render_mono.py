@@ -109,7 +109,14 @@ def main():
     ckpt = torch.load(args.ckpt, map_location="cpu", weights_only=False)
     state = ckpt["model_state_dict"]
     n_saved = state["n_raw"].shape[0]
-    print(f"  Checkpoint has N={n_saved} Gaussians (vs {ds.N_points} init points)")
+    # Detect SH-degree from the saved keys: sh_rest stores K-1 = (deg+1)^2 - 1 coeffs.
+    if "sh_rest" in state:
+        K_rest = state["sh_rest"].shape[1]
+        ckpt_sh_degree = int(round(((K_rest + 1) ** 0.5))) - 1
+    else:
+        ckpt_sh_degree = 0
+    print(f"  Checkpoint has N={n_saved} Gaussians, sh_degree={ckpt_sh_degree} "
+          f"(vs {ds.N_points} init points)")
 
     # Build a placeholder model sized to the checkpoint, then load state_dict.
     # We use the dataset's first n_saved points (or pad if checkpoint is smaller)
@@ -125,13 +132,17 @@ def main():
         sigma_init_sq=0.02,
         sigma_k_pixel=1.0, sigma_k_temporal=0.0,
     )
-    model = trainable_from_params(params, dtype=DTYPE, device=device)
+    model = trainable_from_params(
+        params, dtype=DTYPE, device=device, sh_degree=ckpt_sh_degree,
+    )
     model.load_state_dict(state, strict=True)
     print(f"  Loaded checkpoint -> N={model.N} Gaussians on {device}")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     bg = torch.zeros(3, dtype=DTYPE, device=device)
-    raster_cfg = FastRasterConfig(sigma_3d_blur=args.sigma_3d_blur)
+    raster_cfg = FastRasterConfig(
+        sigma_3d_blur=args.sigma_3d_blur, sh_degree=ckpt_sh_degree,
+    )
 
     for f_idx in frame_idxs:
         cam = ds.cameras_per_frame[f_idx]

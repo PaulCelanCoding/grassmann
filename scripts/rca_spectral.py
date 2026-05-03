@@ -65,11 +65,16 @@ def main():
     L_raw = state["L_raw"].double()
     mu = state["mu"].double()
     opacity_logit = state["opacity_logit"].double()
-    color_logit = state["color_logit"].double()
 
     n_unit = n_raw / n_raw.norm(dim=-1, keepdim=True).clamp_min(1e-12)
     opacity = torch.sigmoid(opacity_logit)
-    color = torch.sigmoid(color_logit)
+    if "color_logit" in state:
+        color = torch.sigmoid(state["color_logit"].double())
+    elif "sh_dc" in state:
+        from grassmann.gaussian import sh_dc_to_rgb
+        color = sh_dc_to_rgb(state["sh_dc"].double())
+    else:
+        raise KeyError("Checkpoint has neither `color_logit` nor `sh_dc`.")
 
     params = GaussianParams(
         n=n_unit, L_raw=L_raw, mu=mu, opacity=opacity, color=color,

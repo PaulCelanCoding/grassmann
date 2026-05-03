@@ -22,7 +22,18 @@ differentiable end-to-end. Reparameterizations:
     projection, so we keep all four components free.
 
   * opacity_logit -> sigmoid -> [0, 1].
-  * color_logit   -> sigmoid -> [0, 1]^3.
+
+  * Color (two paths, gated on `sh_degree`):
+      - sh_degree = 0:   color_logit -> sigmoid -> RGB in [0, 1]^3 (constant-RGB
+        path; matches legacy behavior).
+      - sh_degree > 0:   sh_dc (N, 1, 3) + sh_rest (N, K-1, 3) where
+        K = (sh_degree+1)^2. Concatenated to `sh: (N, K, 3)` and fed to
+        diff-gaussian-rasterization; the CUDA kernel evaluates the SH
+        expansion against the per-Gaussian view direction, so colors are
+        view-dependent. `sh_dc` is initialized via `rgb_to_sh_dc(initial RGB)`;
+        `sh_rest` is initialized to zeros (3DGS convention). For the toy
+        CPU rasterizer fallback the DC term collapses back to constant RGB
+        via `sh_dc_to_rgb`, populated as `params.color`.
 
   * sigma_k_pixel, sigma_k_temporal: scalars (config knobs). Only
     sigma_k_pixel is optionally trainable via learn_sigma_k_pixel.
@@ -32,7 +43,7 @@ from __future__ import annotations
 import torch
 from torch import Tensor, nn
 
-from .gaussian import GaussianParams
+from .gaussian import GaussianParams, num_sh_coeffs, rgb_to_sh_dc, sh_dc_to_rgb
 
 
 DTYPE_DEFAULT = torch.float32   # float32 for training speed; float64 for correctness tests
@@ -53,8 +64,10 @@ class TrainableGaussians(nn.Module):
         dtype: torch.dtype = DTYPE_DEFAULT,
         device: str = "cpu",
         learn_sigma_k_pixel: bool = False,
+        sh_degree: int = 0,
     ):
         super().__init__()
+        self.sh_degree = int(sh_degree)
         self.n_raw = nn.Parameter(params.n.to(dtype=dtype, device=device))
         self.L_raw = nn.Parameter(params.L_raw.to(dtype=dtype, device=device))
         self.mu = nn.Parameter(params.mu.to(dtype=dtype, device=device))
@@ -63,9 +76,18 @@ class TrainableGaussians(nn.Module):
         opacity_logit = torch.log(opacity_clamped / (1.0 - opacity_clamped))
         self.opacity_logit = nn.Parameter(opacity_logit.to(dtype=dtype, device=device))
 
-        color_clamped = params.color.clamp(1e-6, 1.0 - 1e-6)
-        color_logit = torch.log(color_clamped / (1.0 - color_clamped))
-        self.color_logit = nn.Parameter(color_logit.to(dtype=dtype, device=device))
+        if self.sh_degree == 0:
+            color_clamped = params.color.clamp(1e-6, 1.0 - 1e-6)
+            color_logit = torch.log(color_clamped / (1.0 - color_clamped))
+            self.color_logit = nn.Parameter(color_logit.to(dtype=dtype, device=device))
+        else:
+            K = num_sh_coeffs(self.sh_degree)
+            sh_dc_init = rgb_to_sh_dc(params.color).to(dtype=dtype, device=device)  # (N, 1, 3)
+            sh_rest_init = torch.zeros(
+                params.color.shape[0], K - 1, 3, dtype=dtype, device=device,
+            )
+            self.sh_dc = nn.Parameter(sh_dc_init)
+            self.sh_rest = nn.Parameter(sh_rest_init)
 
         sigma_k_pixel_t = torch.tensor(float(params.sigma_k_pixel), dtype=dtype, device=device)
         if learn_sigma_k_pixel:
@@ -86,7 +108,16 @@ class TrainableGaussians(nn.Module):
         n_norm = self.n_raw.norm(dim=-1, keepdim=True).clamp_min(eps)
         n_unit = self.n_raw / n_norm
         opacity = torch.sigmoid(self.opacity_logit)
-        color = torch.sigmoid(self.color_logit)
+
+        sh: torch.Tensor | None
+        if self.sh_degree == 0:
+            color = torch.sigmoid(self.color_logit)
+            sh = None
+        else:
+            sh = torch.cat([self.sh_dc, self.sh_rest], dim=1)              # (N, K, 3)
+            # color is the DC-only collapse, used by the toy CPU rasterizer
+            # fallback (it can't evaluate view-dependent SH).
+            color = sh_dc_to_rgb(self.sh_dc)
 
         sigma_k_pixel_v = (
             self.sigma_k_pixel_param
@@ -101,6 +132,8 @@ class TrainableGaussians(nn.Module):
             color=color,
             sigma_k_pixel=sigma_k_pixel_v,
             sigma_k_temporal=float(self.sigma_k_temporal_param.item()),
+            sh=sh,
+            sh_degree=self.sh_degree,
         )
 
     def renormalize_manifold_(self) -> None:
@@ -117,10 +150,13 @@ def trainable_from_params(
     dtype: torch.dtype = DTYPE_DEFAULT,
     device: str = "cpu",
     learn_sigma_k_pixel: bool = False,
+    sh_degree: int = 0,
 ) -> TrainableGaussians:
     """Convenience constructor."""
     return TrainableGaussians(
-        params, dtype=dtype, device=device, learn_sigma_k_pixel=learn_sigma_k_pixel,
+        params, dtype=dtype, device=device,
+        learn_sigma_k_pixel=learn_sigma_k_pixel,
+        sh_degree=sh_degree,
     )
 
 
@@ -134,20 +170,33 @@ def build_optimizer(
     lr_L: float = 5e-3,
     lr_opacity: float = 5e-2,
     lr_color: float = 2e-2,
+    lr_sh_dc: float = 2.5e-3,
+    lr_sh_rest_ratio: float = 1.0 / 20.0,
     lr_sigma_k_pixel: float = 1e-2,
 ) -> torch.optim.Optimizer:
     """Adam with separate learning rates per parameter type, following the
     standard 3DGS setup. n is a unit-vector manifold parameter (smaller lr),
     mu and L_raw are scale-aware (intermediate), opacity/color are sigmoid
-    logits (larger).
+    logits (larger). When sh_degree > 0, color_logit is replaced by sh_dc and
+    sh_rest, which use 3DGS-style LRs (rest = dc * 1/20).
     """
     param_groups = [
         {"params": [model.n_raw], "lr": lr_n, "name": "n"},
         {"params": [model.mu], "lr": lr_mu, "name": "mu"},
         {"params": [model.L_raw], "lr": lr_L, "name": "L_raw"},
         {"params": [model.opacity_logit], "lr": lr_opacity, "name": "opacity"},
-        {"params": [model.color_logit], "lr": lr_color, "name": "color"},
     ]
+    if model.sh_degree == 0:
+        param_groups.append(
+            {"params": [model.color_logit], "lr": lr_color, "name": "color"}
+        )
+    else:
+        param_groups.append(
+            {"params": [model.sh_dc], "lr": lr_sh_dc, "name": "sh_dc"}
+        )
+        param_groups.append(
+            {"params": [model.sh_rest], "lr": lr_sh_dc * lr_sh_rest_ratio, "name": "sh_rest"}
+        )
     if isinstance(model.sigma_k_pixel_param, nn.Parameter):
         param_groups.append(
             {"params": [model.sigma_k_pixel_param], "lr": lr_sigma_k_pixel, "name": "sigma_k_pixel"}
