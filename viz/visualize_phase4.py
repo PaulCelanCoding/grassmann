@@ -98,7 +98,7 @@ def viz_pipeline_single_time():
     times_tensor = torch.full((points_rec.shape[0],), t, dtype=DTYPE)
     params = init_gaussians_from_points(
         points_rec, times_tensor, scene.cameras,
-        colors=colors, sigma_aa=0.02, sigma_bb=0.2, opacity=0.95, sigma_k=3.0,
+        colors=colors, sigma_aa=0.02, sigma_bb=0.2, opacity=0.95, sigma_k_pixel=3.0, sigma_k_temporal=3.0,
     )
     rec_frames = render_reconstruction(params, t, scene)
 
@@ -198,7 +198,7 @@ def viz_timelapse():
         times_tensor = torch.full((points_rec.shape[0],), float(t), dtype=DTYPE)
         params = init_gaussians_from_points(
             points_rec, times_tensor, scene.cameras,
-            colors=colors, sigma_aa=0.02, sigma_bb=0.2, opacity=0.95, sigma_k=3.0,
+            colors=colors, sigma_aa=0.02, sigma_bb=0.2, opacity=0.95, sigma_k_pixel=3.0, sigma_k_temporal=3.0,
         )
         rec = render_reconstruction(params, float(t), scene)[cam_idx]
         axes[1, col].imshow(rec)

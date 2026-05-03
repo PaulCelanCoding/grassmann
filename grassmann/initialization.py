@@ -69,7 +69,8 @@ def init_gaussian_from_point(
     sigma_bb: float = 0.05,
     sigma_ab: float = 0.0,
     opacity: float = 0.5,
-    sigma_k: float = 1.0,
+    sigma_k_pixel: float = 1.0,
+    sigma_k_temporal: float = 0.0,
 ) -> GaussianParams:
     """Build a single Grassmann Gaussian from a 3D point P at time t.
 
@@ -88,7 +89,8 @@ def init_gaussian_from_point(
               put; nonzero couples depth-change with time-change (useful if
               you know a priori that the point is moving in depth).
     opacity:  initial opacity (before sigmoid). 0.5 is a moderate default.
-    sigma_k:  pixel-space blur variance.
+    sigma_k_pixel:    pixel-space blur variance (rasterizer EWA).
+    sigma_k_temporal: temporal blur variance (added to Sigma_tt for w_t).
 
     Returns a GaussianParams object containing a single Gaussian (N=1).
     """
@@ -164,7 +166,8 @@ def init_gaussian_from_point(
         L=L,
         opacity=torch.tensor([opacity], dtype=DTYPE),
         color=color.unsqueeze(0),
-        sigma_k=sigma_k,
+        sigma_k_pixel=sigma_k_pixel,
+        sigma_k_temporal=sigma_k_temporal,
     )
 
 
@@ -178,7 +181,8 @@ def init_gaussians_from_points(
     sigma_bb: float = 0.05,
     sigma_ab: float = 0.0,
     opacity: float = 0.5,
-    sigma_k: float = 1.0,
+    sigma_k_pixel: float = 1.0,
+    sigma_k_temporal: float = 0.0,
 ) -> GaussianParams:
     """Initialize a batch of Gaussians from a set of (point, time) pairs.
 
@@ -194,7 +198,9 @@ def init_gaussians_from_points(
             points[i], float(times[i].item()), cameras,
             color=colors[i],
             sigma_aa=sigma_aa, sigma_bb=sigma_bb, sigma_ab=sigma_ab,
-            opacity=opacity, sigma_k=sigma_k,
+            opacity=opacity,
+            sigma_k_pixel=sigma_k_pixel,
+            sigma_k_temporal=sigma_k_temporal,
         )
         for i in range(N)
     ]
@@ -207,7 +213,8 @@ def init_gaussians_from_points(
         L=torch.cat([g.L for g in per_gaussian]),
         opacity=torch.cat([g.opacity for g in per_gaussian]),
         color=torch.cat([g.color for g in per_gaussian]),
-        sigma_k=sigma_k,
+        sigma_k_pixel=sigma_k_pixel,
+        sigma_k_temporal=sigma_k_temporal,
     )
 
 

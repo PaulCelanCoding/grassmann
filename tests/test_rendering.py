@@ -34,7 +34,8 @@ def make_params(
     alpha_0=None, beta_0=None,
     L=None,
     opacity=None, color=None,
-    sigma_k=1.0,
+    sigma_k_pixel=1.0,
+    sigma_k_temporal=1.0,
     dtype=DTYPE,
 ):
     """Helper to build GaussianParams with sensible defaults."""
@@ -64,7 +65,9 @@ def make_params(
     return GaussianParams(
         p_im=p_im, q_im=q_im,
         alpha_0=alpha_0, beta_0=beta_0,
-        L=L, opacity=opacity, color=color, sigma_k=sigma_k,
+        L=L, opacity=opacity, color=color,
+        sigma_k_pixel=sigma_k_pixel,
+        sigma_k_temporal=sigma_k_temporal,
     )
 
 
@@ -95,14 +98,14 @@ def test_sigma_3d_symmetric_psd():
 
 
 def test_sigma_tt_matches_formula():
-    """Sigma_tt = r^2 (1+c)^2 sigma_bb + sigma_k^2  (eq. 32)."""
-    params = make_params(n=4, sigma_k=0.5)
+    """Sigma_tt = r^2 (1+c)^2 sigma_bb + sigma_k_temporal  (eq. 32, with split sigma_k)."""
+    params = make_params(n=4, sigma_k_temporal=0.5)
     derived = compute_derived(params)
     Sigma_k = params.Sigma_k()
     frame = G.canonical_frame(params.p(), params.q())
     # r^2 (1+c)^2 = (1+c)/2
     time_scale_sq = (1.0 + frame.c) * 0.5
-    expected = time_scale_sq * Sigma_k[..., 1, 1] + params.sigma_k
+    expected = time_scale_sq * Sigma_k[..., 1, 1] + params.sigma_k_temporal
     assert torch.allclose(derived.Sigma_tt, expected, atol=1e-10)
 
 
@@ -144,10 +147,10 @@ def test_w_t_is_unnormalized():
     This is the fix in Remark 18 -- the normalized density would blow up as
     Sigma_tt -> 0 and drive alpha_eff > 1.
     """
-    # Make Sigma_tt very small by making sigma_bb, sigma_k small.
+    # Make Sigma_tt very small by making sigma_bb, sigma_k_temporal small.
     n = 1
     L = torch.tensor([[[0.01, 0.0], [0.0, 0.01]]], dtype=DTYPE)
-    params = make_params(n=n, L=L, sigma_k=1e-6)
+    params = make_params(n=n, L=L, sigma_k_pixel=1e-6, sigma_k_temporal=1e-6)
     derived = compute_derived(params)
     assert derived.Sigma_tt.item() < 1e-4, f"Sigma_tt should be small; got {derived.Sigma_tt.item()}"
 
@@ -244,7 +247,7 @@ def test_cov2d_is_spd():
         R=torch.eye(3, dtype=DTYPE), c=torch.zeros(3, dtype=DTYPE),
         fx=500, fy=500, cx=320, cy=240,
     )
-    params = make_params(n=5, sigma_k=0.5)
+    params = make_params(n=5, sigma_k_pixel=0.5)
     derived = compute_derived(params)
     tc = condition_on_time(params, derived, 0.0)
     # Place all in front.
@@ -291,7 +294,7 @@ def test_rasterize_single_static_gaussian():
         n=1,
         color=torch.tensor([[1.0, 0.0, 0.0]], dtype=DTYPE),
         opacity=torch.tensor([1.0], dtype=DTYPE),
-        sigma_k=2.0,
+        sigma_k_pixel=2.0,
     )
     derived = compute_derived(params)
     tc = condition_on_time(params, derived, t_0=derived.v_0[0].item())  # at mean time
@@ -320,7 +323,7 @@ def test_rasterize_temporal_fade():
         n=1,
         color=torch.tensor([[1.0, 0.0, 0.0]], dtype=DTYPE),
         opacity=torch.tensor([1.0], dtype=DTYPE),
-        sigma_k=2.0,
+        sigma_k_pixel=2.0,
     )
     derived = compute_derived(params)
     sigma_tt = derived.Sigma_tt.sqrt().item()
@@ -355,7 +358,7 @@ def test_rasterize_occlusion():
         n=2,
         color=torch.tensor([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=DTYPE),  # red, green
         opacity=torch.tensor([0.95, 0.95], dtype=DTYPE),
-        sigma_k=3.0,
+        sigma_k_pixel=3.0,
     )
     derived = compute_derived(params)
     tc = condition_on_time(params, derived, t_0=0.0)

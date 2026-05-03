@@ -12,15 +12,23 @@ parameterized by:
                                                     parameterized via L s.t. Sigma = L L^T
   * opacity    in [0, 1]        (1 DOF)          -- base opacity
   * color      in R^3           (3 DOF, simple)  -- RGB; spherical harmonics deferred
-  * sigma_k    scalar           (pixel blur)     -- isotropic screen-space blur
+  * sigma_k_pixel    scalar     -- isotropic screen-space (pixel-domain) blur variance
+  * sigma_k_temporal scalar     -- additive temporal smoothing variance
 
 Total geometry: 9 DOF (matches standard 3DGS). Plus opacity + color.
+
+The math spec (gradient note v6, §6) defines a single sigma_k acting jointly on
+the (pixel x time) observation. We split it into two scalars because the natural
+scales differ: pixel space is ~O(1) px^2; the temporal axis spans the frame
+range. Keeping them as one field forced a workaround (sigma_k=20 in the legacy
+N3DV trainer) that masked an unrelated bug. See docs/issues/rca_streak_collapse.md
+"Bug B".
 
 This module computes the derived quantities from the parameters:
   - V_k = spatial part of v = alpha_0 * e1_hat + beta_0 * e2_hat (world coords)
   - v_0 = time part of v
   - Sigma_3D = J_embed Sigma_k J_embed^T (rank-2, 3x3)
-  - Sigma_tt = r^2 (1+c)^2 sigma_bb + sigma_k^2 (eq. 32)
+  - Sigma_tt = r^2 (1+c)^2 sigma_bb + sigma_k_temporal (eq. 32, with split sigma_k)
   - c_world = r(1+c) J_embed @ (sigma_ab, sigma_bb)^T (eq. 43)
 """
 from __future__ import annotations
@@ -48,16 +56,18 @@ class GaussianParams:
        Stored as shape (N, 2, 2). This parameterization makes Sigma_k SPD by construction.
     opacity: shape (N,), typically passed through sigmoid if trained.
     color: shape (N, 3).
-    sigma_k: isotropic screen-space blur variance (scalar or shape (N,)).
+    sigma_k_pixel:    pixel^2 blur variance, added to the 2D screen-space cov.
+    sigma_k_temporal: temporal blur variance, added to Sigma_tt for the w_t weight.
     """
-    p_im: Tensor           # (N, 3)
-    q_im: Tensor           # (N, 3)
-    alpha_0: Tensor        # (N,)
-    beta_0: Tensor         # (N,)
-    L: Tensor              # (N, 2, 2)  lower-triangular
-    opacity: Tensor        # (N,)
-    color: Tensor          # (N, 3)
-    sigma_k: float = 1.0   # pixel^2 blur variance (for the spatial +sigma^2 I term)
+    p_im: Tensor                    # (N, 3)
+    q_im: Tensor                    # (N, 3)
+    alpha_0: Tensor                 # (N,)
+    beta_0: Tensor                  # (N,)
+    L: Tensor                       # (N, 2, 2)  lower-triangular
+    opacity: Tensor                 # (N,)
+    color: Tensor                   # (N, 3)
+    sigma_k_pixel: float = 1.0      # +sigma^2 I term in 2D EWA cov (rasterizer)
+    sigma_k_temporal: float = 0.0   # +sigma^2 in Sigma_tt for temporal weight w_t
 
     @property
     def N(self) -> int:
@@ -117,11 +127,11 @@ def compute_derived(params: GaussianParams) -> DerivedQuantities:
     contribution.
 
     We therefore split the two roles:
-      - sigma_tt_pure = r^2(1+c)^2 sigma_bb    (used for 3D conditioning, eqs. 44/45)
-      - sigma_tt_blur = sigma_tt_pure + sigma_k^2   (used for the temporal weight, eq. 37)
+      - sigma_tt_pure = r^2(1+c)^2 sigma_bb               (used for 3D conditioning, eqs. 44/45)
+      - sigma_tt_blur = sigma_tt_pure + sigma_k_temporal  (used for the temporal weight, eq. 37)
     This preserves the rank-1 property exactly while keeping the temporal
-    fall-off well-behaved. For typical operating conditions (sigma_tt_pure >> sigma_k^2)
-    the two are indistinguishable; the distinction only matters when sigma_bb -> 0.
+    fall-off well-behaved. The pixel-domain sigma_k (sigma_k_pixel) is applied
+    separately by the rasterizer as +sigma^2 I_2 on the 2D screen covariance.
     """
     p = params.p()                                      # (N, 4)
     q = params.q()                                      # (N, 4)
@@ -152,7 +162,7 @@ def compute_derived(params: GaussianParams) -> DerivedQuantities:
     sigma_tt_pure = time_scale_sq * sigma_bb            # (N,)
     # Blurred temporal variance (for the unnormalized weight w_t). We ALSO use this
     # as the "Sigma_tt" exposed publicly, for consistency with the paper's eq. (32).
-    Sigma_tt = sigma_tt_pure + params.sigma_k           # (N,)
+    Sigma_tt = sigma_tt_pure + params.sigma_k_temporal  # (N,)
     # Stash the pure one privately for the conditioning step.
     # We attach it as an extra field.
 

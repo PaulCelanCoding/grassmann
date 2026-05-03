@@ -69,7 +69,7 @@ def demo_overfit():
     wrong_colors = torch.full_like(colors, 0.5)
     params_init = init_gaussians_from_points(
         points_rec, times_t, scene.cameras, colors=wrong_colors,
-        sigma_aa=0.02, sigma_bb=0.05, opacity=0.5, sigma_k=3.0,
+        sigma_aa=0.02, sigma_bb=0.05, opacity=0.5, sigma_k_pixel=3.0, sigma_k_temporal=3.0,
     )
     model = trainable_from_params(params_init, dtype=DTYPE)
 
@@ -170,7 +170,7 @@ def demo_multiview_multiframe():
 
     params_init = init_gaussians_from_points(
         points_rec, times_t, scene.cameras, colors=colors,
-        sigma_aa=0.02, sigma_bb=0.15, opacity=0.5, sigma_k=3.0,
+        sigma_aa=0.02, sigma_bb=0.15, opacity=0.5, sigma_k_pixel=3.0, sigma_k_temporal=3.0,
     )
     model = trainable_from_params(params_init, dtype=DTYPE)
 

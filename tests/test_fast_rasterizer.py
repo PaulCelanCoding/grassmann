@@ -128,7 +128,7 @@ def test_fast_rasterize_falls_back_on_cpu():
     colors = torch.tensor([[1.0, 0.2, 0.2], [0.2, 1.0, 0.2]], dtype=torch.float64)
     params_init = init_gaussians_from_points(
         points, times_t, scene.cameras, colors=colors,
-        sigma_aa=0.02, sigma_bb=0.1, opacity=0.5, sigma_k=2.0,
+        sigma_aa=0.02, sigma_bb=0.1, opacity=0.5, sigma_k_pixel=2.0,
     )
     model = trainable_from_params(params_init, dtype=DTYPE)
     params = model.forward()
@@ -149,7 +149,7 @@ def test_fast_rasterize_matches_toy_in_fallback():
     colors = torch.tensor([[1.0, 0.2, 0.2]], dtype=torch.float64)
     params_init = init_gaussians_from_points(
         points, times_t, scene.cameras, colors=colors,
-        sigma_aa=0.02, sigma_bb=0.1, opacity=0.5, sigma_k=2.0,
+        sigma_aa=0.02, sigma_bb=0.1, opacity=0.5, sigma_k_pixel=2.0,
     )
     model = trainable_from_params(params_init, dtype=DTYPE)
     params = model.forward()
@@ -184,7 +184,7 @@ def test_trainer_with_fast_rasterizer_config():
     colors = torch.tensor([[1.0, 0.2, 0.2]], dtype=torch.float64)
     params_init = init_gaussians_from_points(
         points, times_t, scene.cameras, colors=colors,
-        sigma_aa=0.02, sigma_bb=0.1, opacity=0.5, sigma_k=2.0,
+        sigma_aa=0.02, sigma_bb=0.1, opacity=0.5, sigma_k_pixel=2.0,
     )
     model = trainable_from_params(params_init, dtype=DTYPE)
 

@@ -113,7 +113,8 @@ def main():
         L=L,
         opacity=torch.tensor([0.99], dtype=torch.float64),
         color=torch.tensor([[1.0, 0.1, 0.1]], dtype=torch.float64),    # red
-        sigma_k=1.0,
+        sigma_k_pixel=1.0,
+        sigma_k_temporal=1.0,
     )
     derived = compute_derived(params)
     print(f"\nSingle Gaussian:")
@@ -137,7 +138,8 @@ def main():
         L=params.L.to(DTYPE),
         opacity=params.opacity.to(DTYPE),
         color=params.color.to(DTYPE),
-        sigma_k=params.sigma_k,
+        sigma_k_pixel=params.sigma_k_pixel,
+        sigma_k_temporal=params.sigma_k_temporal,
     )
     derived_f32 = compute_derived(params_f32)
     tc = condition_on_time(params_f32, derived_f32, float(t_target))

@@ -77,7 +77,7 @@ def project_to_screen(
     cov2d = J_pi @ Sigma_cam @ J_pi.transpose(-1, -2)            # (N, 2, 2)
     # Regularize with isotropic pixel blur.
     eye2 = torch.eye(2, dtype=cov2d.dtype, device=cov2d.device)
-    cov2d = cov2d + params.sigma_k * eye2
+    cov2d = cov2d + params.sigma_k_pixel * eye2
 
     return ScreenGaussians(
         uv=uv, cov2d=cov2d, alpha=tc.alpha_eff, color=params.color,

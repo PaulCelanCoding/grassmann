@@ -45,7 +45,7 @@ def build_large_model(n_gaussians: int, cams):
     colors = torch.rand(n_gaussians, 3, dtype=torch.float64)
     params_init = init_gaussians_from_points(
         points, times_t, cams, colors=colors,
-        sigma_aa=0.005, sigma_bb=0.01, opacity=0.5, sigma_k=1.0,
+        sigma_aa=0.005, sigma_bb=0.01, opacity=0.5, sigma_k_pixel=1.0, sigma_k_temporal=1.0,
     )
     return trainable_from_params(params_init, dtype=DTYPE, device=DEVICE)
 

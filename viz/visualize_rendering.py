@@ -46,7 +46,8 @@ def ray_gaussian(
     depth_mean=5.0,                # where along the ray the Gaussian mean sits
     sigma_aa=0.005, sigma_bb=0.005, sigma_ab=0.0,
     opacity=0.95, color=(1.0, 0.4, 0.4),
-    sigma_k=5.0,
+    sigma_k_pixel=5.0,
+    sigma_k_temporal=5.0,
 ):
     """Construct a single Gaussian on a RAY FROM THE ORIGIN in the given direction.
 
@@ -90,7 +91,8 @@ def ray_gaussian(
         alpha_0=alpha_val, beta_0=beta_val, L=L,
         opacity=torch.tensor([opacity], dtype=DTYPE),
         color=torch.tensor([list(color)], dtype=DTYPE),
-        sigma_k=sigma_k,
+        sigma_k_pixel=sigma_k_pixel,
+        sigma_k_temporal=sigma_k_temporal,
     )
 
 
@@ -99,7 +101,8 @@ def single_gaussian(
     x_line, u_dir,
     sigma_aa=0.01, sigma_ab=0.0, sigma_bb=0.01,
     opacity=0.95, color=(1.0, 0.4, 0.4),
-    sigma_k=5.0,
+    sigma_k_pixel=5.0,
+    sigma_k_temporal=5.0,
 ):
     """Construct a single Gaussian at the canonical embedded point of a line."""
     x_line_t = torch.tensor(x_line, dtype=DTYPE).unsqueeze(0)
@@ -128,7 +131,8 @@ def single_gaussian(
         alpha_0=alpha_val, beta_0=beta_val, L=L,
         opacity=torch.tensor([opacity], dtype=DTYPE),
         color=torch.tensor([list(color)], dtype=DTYPE),
-        sigma_k=sigma_k,
+        sigma_k_pixel=sigma_k_pixel,
+        sigma_k_temporal=sigma_k_temporal,
     )
 
 
@@ -142,7 +146,8 @@ def concat_params(*param_list):
         L=torch.cat([p.L for p in param_list]),
         opacity=torch.cat([p.opacity for p in param_list]),
         color=torch.cat([p.color for p in param_list]),
-        sigma_k=param_list[0].sigma_k,
+        sigma_k_pixel=param_list[0].sigma_k_pixel,
+        sigma_k_temporal=param_list[0].sigma_k_temporal,
     )
 
 
@@ -164,7 +169,7 @@ def demo_temporal_fade():
         direction=[0.0, 0.0, 1.0],   # straight ahead -- splat at image center
         depth_mean=5.0,
         sigma_aa=0.01, sigma_ab=0.0, sigma_bb=0.05,
-        opacity=0.98, color=(1.0, 0.4, 0.4), sigma_k=5.0,
+        opacity=0.98, color=(1.0, 0.4, 0.4), sigma_k_pixel=5.0, sigma_k_temporal=5.0,
     )
     derived = compute_derived(params)
     v0 = derived.v_0.item()
@@ -202,12 +207,12 @@ def demo_occlusion():
     p_red = ray_gaussian(
         direction=[0.0, 0.0, 1.0], depth_mean=3.0,
         sigma_aa=0.005, sigma_bb=0.05,
-        opacity=0.95, color=(1.0, 0.3, 0.3), sigma_k=8.0,
+        opacity=0.95, color=(1.0, 0.3, 0.3), sigma_k_pixel=8.0, sigma_k_temporal=8.0,
     )
     p_green = ray_gaussian(
         direction=[0.0, 0.0, 1.0], depth_mean=8.0,
         sigma_aa=0.005, sigma_bb=0.05,
-        opacity=0.95, color=(0.3, 1.0, 0.3), sigma_k=15.0,
+        opacity=0.95, color=(0.3, 1.0, 0.3), sigma_k_pixel=15.0, sigma_k_temporal=15.0,
     )
     params_both = concat_params(p_red, p_green)
 
@@ -250,7 +255,7 @@ def demo_motion():
         direction=[0.2, 0.0, 1.0],   # ray to the right and forward
         depth_mean=5.0,
         sigma_aa=0.5, sigma_ab=0.3, sigma_bb=0.3,   # temporal extent big, coupled with alpha
-        opacity=0.98, color=(1.0, 0.4, 0.4), sigma_k=5.0,
+        opacity=0.98, color=(1.0, 0.4, 0.4), sigma_k_pixel=5.0, sigma_k_temporal=5.0,
     )
     derived = compute_derived(params)
     v0 = derived.v_0.item()
@@ -290,17 +295,17 @@ def demo_scene():
     p1 = ray_gaussian(
         direction=[-0.15, 0.1, 1.0], depth_mean=4.0,
         sigma_aa=0.01, sigma_bb=0.05,
-        opacity=0.95, color=(1.0, 0.3, 0.3), sigma_k=5.0,
+        opacity=0.95, color=(1.0, 0.3, 0.3), sigma_k_pixel=5.0, sigma_k_temporal=5.0,
     )
     p2 = ray_gaussian(
         direction=[0.15, -0.05, 1.0], depth_mean=6.0,
         sigma_aa=0.01, sigma_bb=0.05,
-        opacity=0.95, color=(0.3, 1.0, 0.3), sigma_k=5.0,
+        opacity=0.95, color=(0.3, 1.0, 0.3), sigma_k_pixel=5.0, sigma_k_temporal=5.0,
     )
     p3 = ray_gaussian(
         direction=[0.0, 0.05, 1.0], depth_mean=8.0,
         sigma_aa=0.01, sigma_bb=0.05,
-        opacity=0.95, color=(0.3, 0.5, 1.0), sigma_k=5.0,
+        opacity=0.95, color=(0.3, 0.5, 1.0), sigma_k_pixel=5.0, sigma_k_temporal=5.0,
     )
     # Shift beta_0 to stagger the temporal centers.
     p1.beta_0[:] = 0.0       # v_0 ~ 0

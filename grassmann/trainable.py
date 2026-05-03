@@ -49,7 +49,9 @@ class TrainableGaussians(nn.Module):
       * opacity: stored as 'opacity_logit', exposed via sigmoid().
       * color: stored as 'color_logit', exposed via sigmoid().
       * L: lower-triangular, we zero the upper triangle on every forward.
-      * sigma_k: a scalar (non-trainable by default -- fold into opacity).
+      * sigma_k_pixel, sigma_k_temporal: scalars (non-trainable by default).
+        Only sigma_k_pixel is exposed as learnable via `learn_sigma_k_pixel` --
+        the temporal component is a config knob, not an optimization target.
     """
 
     def __init__(
@@ -58,7 +60,7 @@ class TrainableGaussians(nn.Module):
         *,
         dtype: torch.dtype = DTYPE_DEFAULT,
         device: str = "cpu",
-        learn_sigma_k: bool = False,
+        learn_sigma_k_pixel: bool = False,
     ):
         super().__init__()
         # Register parameters. We move everything to the requested dtype/device.
@@ -79,12 +81,16 @@ class TrainableGaussians(nn.Module):
         color_logit = torch.log(color_clamped / (1.0 - color_clamped))
         self.color_logit = nn.Parameter(color_logit.to(dtype=dtype, device=device))
 
-        # sigma_k: scalar; can be registered as a buffer or a parameter.
-        sigma_k_t = torch.tensor(float(params.sigma_k), dtype=dtype, device=device)
-        if learn_sigma_k:
-            self.sigma_k_param = nn.Parameter(sigma_k_t)
+        # sigma_k_pixel: pixel-domain blur. Optionally trainable.
+        sigma_k_pixel_t = torch.tensor(float(params.sigma_k_pixel), dtype=dtype, device=device)
+        if learn_sigma_k_pixel:
+            self.sigma_k_pixel_param = nn.Parameter(sigma_k_pixel_t)
         else:
-            self.register_buffer("sigma_k_param", sigma_k_t)
+            self.register_buffer("sigma_k_pixel_param", sigma_k_pixel_t)
+
+        # sigma_k_temporal: temporal blur. Always a buffer (config-only).
+        sigma_k_temporal_t = torch.tensor(float(params.sigma_k_temporal), dtype=dtype, device=device)
+        self.register_buffer("sigma_k_temporal_param", sigma_k_temporal_t)
 
     @property
     def N(self) -> int:
@@ -113,8 +119,14 @@ class TrainableGaussians(nn.Module):
         # Recover positive quantities.
         opacity = torch.sigmoid(self.opacity_logit)
         color = torch.sigmoid(self.color_logit)
-        sigma_k_val = self.sigma_k_param
 
+        # If sigma_k_pixel is trainable, pass the tensor through so gradients flow;
+        # otherwise unwrap to float to match the GaussianParams: float dataclass field.
+        sigma_k_pixel_v = (
+            self.sigma_k_pixel_param
+            if isinstance(self.sigma_k_pixel_param, nn.Parameter)
+            else float(self.sigma_k_pixel_param.item())
+        )
         return GaussianParams(
             p_im=p_im_unit,
             q_im=q_im_unit,
@@ -123,7 +135,8 @@ class TrainableGaussians(nn.Module):
             L=L_tri,
             opacity=opacity,
             color=color,
-            sigma_k=sigma_k_val if sigma_k_val.dim() == 0 else float(sigma_k_val.item()),
+            sigma_k_pixel=sigma_k_pixel_v,
+            sigma_k_temporal=float(self.sigma_k_temporal_param.item()),
         )
 
     def renormalize_manifold_(self) -> None:
@@ -143,10 +156,12 @@ def trainable_from_params(
     *,
     dtype: torch.dtype = DTYPE_DEFAULT,
     device: str = "cpu",
-    learn_sigma_k: bool = False,
+    learn_sigma_k_pixel: bool = False,
 ) -> TrainableGaussians:
     """Convenience constructor."""
-    return TrainableGaussians(params, dtype=dtype, device=device, learn_sigma_k=learn_sigma_k)
+    return TrainableGaussians(
+        params, dtype=dtype, device=device, learn_sigma_k_pixel=learn_sigma_k_pixel,
+    )
 
 
 # ---- Per-parameter-group learning rate setup -------------------------------
@@ -159,7 +174,7 @@ def build_optimizer(
     lr_L: float = 5e-3,
     lr_opacity: float = 5e-2,
     lr_color: float = 2e-2,
-    lr_sigma_k: float = 1e-2,
+    lr_sigma_k_pixel: float = 1e-2,
 ) -> torch.optim.Optimizer:
     """Adam with separate learning rates per parameter type, following the
     standard 3DGS setup. Rates are in a scale-invariant-ish order: p, q are
@@ -173,7 +188,9 @@ def build_optimizer(
         {"params": [model.opacity_logit], "lr": lr_opacity, "name": "opacity"},
         {"params": [model.color_logit], "lr": lr_color, "name": "color"},
     ]
-    if isinstance(model.sigma_k_param, nn.Parameter):
-        param_groups.append({"params": [model.sigma_k_param], "lr": lr_sigma_k, "name": "sigma_k"})
+    if isinstance(model.sigma_k_pixel_param, nn.Parameter):
+        param_groups.append(
+            {"params": [model.sigma_k_pixel_param], "lr": lr_sigma_k_pixel, "name": "sigma_k_pixel"}
+        )
 
     return torch.optim.Adam(param_groups)

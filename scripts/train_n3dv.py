@@ -222,7 +222,8 @@ def train(args):
             sigma_bb=0.05,
             sigma_ab=0.0,
             opacity=0.3,
-            sigma_k=20.0,
+            sigma_k_pixel=20.0,
+            sigma_k_temporal=20.0,
         )
         all_params.append(g)
 
@@ -236,7 +237,8 @@ def train(args):
         L=torch.cat([g.L for g in all_params]),
         opacity=torch.cat([g.opacity for g in all_params]),
         color=torch.cat([g.color for g in all_params]),
-        sigma_k=20.0,
+        sigma_k_pixel=20.0,
+        sigma_k_temporal=20.0,
     )
     print(f"Built {params_init.p_im.shape[0]} Gaussians with per-point scales")
 

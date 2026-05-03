@@ -38,7 +38,7 @@ def small_model(n_cams=2, n_points=5):
     colors = torch.rand(n_points, 3, dtype=torch.float64)
     params_init = init_gaussians_from_points(
         points, times, scene.cameras, colors=colors,
-        sigma_aa=0.02, sigma_bb=0.05, opacity=0.5, sigma_k=2.0,
+        sigma_aa=0.02, sigma_bb=0.05, opacity=0.5, sigma_k_pixel=2.0,
     )
     return trainable_from_params(params_init, dtype=DTYPE), scene
 
@@ -255,7 +255,7 @@ def test_trainer_with_density_control():
     times_t = torch.full((points_rec.shape[0],), t, dtype=torch.float64)
     params_init = init_gaussians_from_points(
         points_rec, times_t, scene.cameras, colors=colors,
-        sigma_aa=0.02, sigma_bb=0.1, opacity=0.3, sigma_k=3.0,
+        sigma_aa=0.02, sigma_bb=0.1, opacity=0.3, sigma_k_pixel=3.0,
     )
     model = trainable_from_params(params_init, dtype=DTYPE)
     N_initial = model.N

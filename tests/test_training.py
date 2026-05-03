@@ -181,7 +181,7 @@ def test_trainer_overfit_one_view_one_frame():
     times_t = torch.full((points_rec.shape[0],), t, dtype=torch.float64)
     params_init = init_gaussians_from_points(
         points_rec, times_t, scene.cameras, colors=colors,
-        sigma_aa=0.02, sigma_bb=0.05, opacity=0.5, sigma_k=3.0,
+        sigma_aa=0.02, sigma_bb=0.05, opacity=0.5, sigma_k_pixel=3.0,
     )
     model = trainable_from_params(params_init, dtype=DTYPE)
 
@@ -253,7 +253,7 @@ def test_trainer_multi_view_multi_frame():
     times_t = torch.full((points_rec.shape[0],), t_init, dtype=torch.float64)
     params_init = init_gaussians_from_points(
         points_rec, times_t, scene.cameras, colors=colors,
-        sigma_aa=0.02, sigma_bb=0.2, opacity=0.5, sigma_k=3.0,
+        sigma_aa=0.02, sigma_bb=0.2, opacity=0.5, sigma_k_pixel=3.0,
     )
     model = trainable_from_params(params_init, dtype=DTYPE)
 
