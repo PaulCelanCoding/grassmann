@@ -54,6 +54,12 @@ class TrainerConfig:
     lr_L: float = 5e-3
     lr_opacity: float = 5e-2
     lr_color: float = 2e-2
+    # Log-linear LR decay applied to geometric params (n, mu, L_raw) only.
+    # 1.0 disables; <1 decays geometric LRs from base*1 to base*lr_decay over
+    # num_iters via lr(t) = base * lr_decay**t. Mirrors 3DGS's position_lr_final/
+    # position_lr_init = 0.01 schedule over 30k iters. Color/opacity not scheduled
+    # (3DGS does the same).
+    lr_decay: float = 1.0
     # Background color for rendering
     background: Tensor = field(default_factory=lambda: torch.tensor([0.05, 0.05, 0.1]))
     # Validation
@@ -138,6 +144,16 @@ class Trainer:
             lr_color=self.config.lr_color,
         )
         self.optimizer = self._build_opt(model)
+        # Migration: density tracker may rebuild the optimizer mid-training.
+        # Capture base LRs from the FIRST optimizer build so the scheduler is
+        # not perturbed by density-event re-instantiations.
+
+        # Snapshot base LRs so the scheduler can multiply by decay**t. We only
+        # schedule geometric params (n, mu, L_raw); color/opacity stay constant.
+        self._base_lrs: dict[str, float] = {
+            g["name"]: g["lr"] for g in self.optimizer.param_groups
+            if g["name"] in ("n", "mu", "L_raw")
+        }
 
         # Density control (Phase 6). The tracker holds a reference to the
         # optimizer so density events can migrate Adam state in place rather
@@ -329,7 +345,17 @@ class Trainer:
         running_loss = 0.0
         running_l1 = 0.0
         running_psnr = 0.0
+        decay = self.config.lr_decay
         for i in range(1, n + 1):
+            # Log-linear LR schedule on geometric params (mirrors 3DGS).
+            if decay < 1.0:
+                t = min(i / max(n, 1), 1.0)
+                scale = decay ** t                       # 1 → decay over training
+                for group in self.optimizer.param_groups:
+                    name = group["name"]
+                    if name in self._base_lrs:
+                        group["lr"] = self._base_lrs[name] * scale
+
             loss_val, l1_val, psnr_val = self.train_step()
             running_loss += loss_val
             running_l1 += l1_val

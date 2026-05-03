@@ -164,6 +164,11 @@ def main():
     ap.add_argument("--lambda_aniso", type=float, default=0.0,
                     help="Bounded anisotropy penalty on Σ_3D(t_0). Trims the runaway "
                          "λ_max/λ_min tail. 0 disables. Recommended ≈1e-3 (small).")
+    ap.add_argument("--lr_decay", type=float, default=1.0,
+                    help="Log-linear LR decay factor for geometric params (n, mu, "
+                         "L_raw). 1.0 disables. <1 decays from base*1 to base*lr_decay "
+                         "over num_iters via lr(t)=base*lr_decay**t. 3DGS uses 0.01 "
+                         "(100x decay) over 30k iters.")
     ap.add_argument("--sh_degree", type=int, default=0,
                     help="Spherical-harmonics band for per-Gaussian color. 0 keeps the "
                          "legacy constant-RGB path (color_logit). >0 swaps in sh_dc + "
@@ -301,6 +306,7 @@ def main():
         opacity_reset_every=args.opacity_reset_every,
         opacity_reset_logit=args.opacity_reset_logit,
         lambda_aniso=args.lambda_aniso,
+        lr_decay=args.lr_decay,
     )
     if val_indices_override is not None:
         cfg_kwargs["validation_frames"] = val_indices_override

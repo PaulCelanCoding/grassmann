@@ -136,6 +136,7 @@ def train(
     max_split_per_event: int,
     opacity_prune_threshold: float,
     sh_degree: int,
+    lr_decay: float,
 ) -> None:
     scene_dir = _ensure_scene_unpacked(scene)
     suffix = f"-{run_tag}" if run_tag else ""
@@ -184,6 +185,8 @@ def train(
             argv += ["--max_split_per_event", str(max_split_per_event)]
     if sh_degree > 0:
         argv += ["--sh_degree", str(sh_degree)]
+    if lr_decay != 1.0:
+        argv += ["--lr_decay", str(lr_decay)]
     _run(argv)
     ckpt_vol.commit()
 
@@ -263,6 +266,7 @@ def main(
     max_split_per_event: int = 0,
     opacity_prune_threshold: float = 1e-3,
     sh_degree: int = 0,
+    lr_decay: float = 1.0,
 ):
     """
     --cmd smoke:  short run (--iters used; default 500) at scale 4. Validates
@@ -299,6 +303,7 @@ def main(
             max_split_per_event=max_split_per_event,
             opacity_prune_threshold=opacity_prune_threshold,
             sh_degree=sh_degree,
+            lr_decay=lr_decay,
         )
     elif cmd == "train":
         train.remote(
@@ -328,6 +333,7 @@ def main(
             max_split_per_event=max_split_per_event,
             opacity_prune_threshold=opacity_prune_threshold,
             sh_degree=sh_degree,
+            lr_decay=lr_decay,
         )
     elif cmd == "render":
         if not ckpt:

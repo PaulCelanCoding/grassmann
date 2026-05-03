@@ -18,14 +18,16 @@ build). D3DGS's per-view file reports mean LPIPS 0.1524.
 
 ---
 
-## Attribution (1-line summary, all measured at scale 8 vs D3DGS GT)
+## Attribution (final, all measured at scale 8 vs D3DGS GT)
 
 | bucket | dB closed | evidence |
 |---|---|---|
-| **Per-Gaussian appearance DOF (constant RGB → SH3)** | **+0.60 dB** (measured) | direct A/B at iter 14k, same seed/init/N: 24.26 → 24.86 dB (§6) |
-| **Gaussian count (37 840 → 85 830)** | **+0.02 dB** (measured) | direct A/B at iter 14k, same seed/init/sh=0: 24.26 → 24.28 dB (§6) |
-| **Motion modeling (linear drift via Schur on time)** | < 0.5 dB upper bound | Δ-PSNR ↔ motion correlation = +0.07 (cam disp), −0.02 (image L1); Q4 high-motion frames show *smaller* deficit than Q3; spatial deficit is uniform across dyn/static regions |
-| **Residual (unattributed)** | ≈ 2.0 dB | gap to D3DGS still 2.64 dB after SH3, and the levers above sum to <1 dB. Candidates: COLMAP-density init, motion model in expectation (not in correlation), numerical Σ_3D lift (ε I = 1e-4), 3-plane projector vs explicit scales/rotations (rasterizer-side EWA). Not yet isolated. |
+| **LR schedule (fixed → log-linear decay 1 → 0.01 on n, mu, L_raw)** | **+0.96 dB** | §8: SH3 30k+LRdecay 26.13 vs SH3 30k fixed-LR 25.16 |
+| **Per-Gaussian appearance DOF (constant RGB → SH3)** | **+0.60 dB** | §6b: SH3 14k 24.86 vs sh=0 14k 24.26 (same seed/N) |
+| **Iter budget (14k → 30k iters, densify_stop 10k → 15k)** | **+0.31 dB** | §8: SH3 30k 25.16 vs SH3 14k 24.86 (fixed LR control) |
+| **Gaussian count (37 840 → 85 830)** | **+0.02 dB** | §6: N3x A/B (sh=0, same seed) |
+| **Motion modeling (linear drift via Schur on time)** | < 0.5 dB upper bound | §2: Δ-PSNR ↔ motion correlation ≈ 0; §3: spatial deficit uniform across dyn/static |
+| **Residual (unattributed)** | **≈ 1.37 dB** | §8 closed 1.87/3.24 dB (58%). Remaining candidates need structural code (parameterization swap, densify-threshold tuning, opacity-reset cadence) |
 
 ---
 
@@ -174,12 +176,13 @@ high-deficit frames identified in §1 (corr SH3-lift ↔ baseline-deficit:
 single frame is not appearance-DOF).
 
 The early-iter 500 signal (+3 dB train PSNR at same N) did not predict the
-14k endpoint. The likely mechanism: under sh=0, densification spends
-geometry-DOF to compensate for missing appearance-DOF (more, smaller
-Gaussians to approximate within-Gaussian color gradients), so by 14k the
-sh=0 path has *traded geometry for appearance*. SH3 lifts the ceiling that
-trade-off was working against, but most of the early gap closes via the
-sh=0 path's geometric workaround.
+14k endpoint. Original framing speculated this was sh=0 trading geometry
+for appearance via densification; §8 weakens that story — the same fixed
+LR that §8 shows was over-stepping geometric optima everywhere likely
+ate most of the early SH gain. The +0.60 dB number at 14k stands; the
+mechanism is more "the LR schedule was throwing away gains across the
+board" than "sh=0 was specifically using extra Gaussians to compensate
+for missing color DOF."
 
 Per-frame data: `/tmp/perframe_sh3_apples.json`.
 
@@ -202,23 +205,29 @@ the menu in the earlier 2-hypothesis test.
 
 ## Recommendation
 
-1. **Land SH degree 3 as the color path for new training.** Measured
-   +0.60 dB at iter 14k, same seed/N as baseline; closes ~19% of the gap.
-   Small but the largest single lever found. Implementation lives in
-   `grassmann/{gaussian,trainable,fast_rasterizer,density_control}.py`;
-   `--sh_degree 3` on `train_mono.py`. Default stays at 0 for backward
-   compat with existing checkpoints; new training should pass
-   `--sh_degree 3`.
-2. **Do NOT chase N.** The N3x test (§6) shows count is dead headroom on
-   this scene: +0.02 dB for 2.27× N. Keeping `max_split_per_event=500` is
-   correct. *Caveat:* untested whether SH3 + larger N is super-additive
-   (D3DGS uses both).
-3. **Investigate the ≈ 2 dB residual.** Three single-flag probes in §7
-   eliminated `sigma_3d_blur` and init-density as residual levers; the
-   remaining candidates require non-trivial code changes. See §7 for the
-   narrowed list (training schedule, iter budget, 3-plane projector vs
-   explicit `(scales, rotations)`).
-4. *(Defer)* Motion-model upgrade. Bound at ≤ 0.5 dB on slice-banana scale 8.
+After §8 the lever ranking changed; updated in priority order:
+
+1. **Use LR-decay on geometric params.** Largest single lever found:
+   **+0.96 dB** (incremental over iter-budget; +1.27 dB cumulative over
+   SH3 14k). Log-linear schedule on `(n, mu, L_raw)` from `base*1` to
+   `base*0.01` over `num_iters`, color/opacity/SH constant.
+   `--lr_decay 0.01` in `train_mono.py`. New training should always pass
+   this.
+2. **Train 30k iters with `densify_stop=15000`.** +0.31 dB over the 14k
+   default. Val PSNR plateaus around iter 21k under decaying LR, so 30k
+   has small further headroom; longer training is unlikely to help much.
+3. **Land SH degree 3 as the color path.** +0.60 dB at iter 14k. Already
+   landed in the codebase; pass `--sh_degree 3`.
+4. **Do NOT chase N.** §6 shows count is dead headroom (+0.02 dB for
+   2.27× N). Keeping `max_split_per_event=500` is correct. (*Caveat*:
+   the untested SH3 × larger-N interaction may differ; not measured.)
+5. **Investigate the remaining 1.37 dB residual.** §8 confirms iter
+   budget + LR schedule are largely settled — the remaining gap likely
+   needs structural work (3-plane projector vs explicit
+   `(scales, rotations)`, densification thresholds, opacity-reset
+   cadence). See §8's "What's still unaccounted for" list.
+6. *(Defer)* Motion-model upgrade. Bound at ≤ 0.5 dB on slice-banana
+   scale 8.
 
 ## §7. Residual probes — what the ~2 dB is NOT
 
@@ -288,6 +297,72 @@ schedule from parameterization. The structurally most informative probe
 would be the 3-plane → explicit `(scales, rotations)` switch — that one
 requires real code work and would tell us whether the parameterization
 itself is costing capacity. Pick by what kind of answer is wanted.
+
+## §8. Iter budget + LR schedule probes
+
+Two more probes after §7's null results, run in parallel on Modal:
+
+| run | iters | densify_stop | LR schedule | final N | mean PSNR | Δ vs SH3 14k |
+|---|---|---|---|---|---|---|
+| SH3 14k baseline | 14 000 | 10 000 | fixed | 37 833 | 24.86 | — |
+| SH3 30k | 30 000 | 15 000 | fixed | 50 328 | 25.16 | **+0.31 dB** |
+| **SH3 30k + LR-decay** | 30 000 | 15 000 | log-linear 1 → 0.01 on (n, mu, L_raw) | 50 202 | **26.13** | **+1.27 dB** |
+| D3DGS reference | 14 000 | (n/a) | exp decay | ~100k+ | 27.50 | gap to LR-decay = **−1.37 dB** |
+
+LR-decay alone (subtracting iter budget): **+0.96 dB**. This is by far the
+single biggest residual lever measured in the entire RCA. Internal val
+trajectory shows the schedule is doing what's expected: train PSNR climbs
+from ~25 dB at iter 15k to 28.6 dB at iter 30k under decaying LR (fixed-LR
+30k plateaus around 24.7 dB train), and val saturates at 24.46-24.48 dB
+by iter 21k.
+
+### Spatial decomposition of LR-decay 30k vs D3DGS (whole val set)
+
+| region | LR-decay error | D3DGS error | ratio | (was at SH3 14k) |
+|---|---|---|---|---|
+| dynamic (motion |Δ| > 0.05) | 0.0468 | 0.0399 | **1.17×** | 1.38× |
+| static | 0.0204 | 0.0181 | **1.13×** | 1.37× |
+
+Both ratios dropped by ~0.2 in lockstep — the LR-schedule fix is uniform
+in space, consistent with "the optimizer was previously overstepping
+geometric optima everywhere." The residual deficit shape is unchanged
+(still roughly equal dyn/static), just smaller.
+
+### Updated attribution
+
+| lever | dB closed (cumulative) | dB closed (incremental) |
+|---|---|---|
+| SH3 appearance DOF (§6b) | +0.60 | +0.60 |
+| iter budget 14k → 30k + densify_stop 10k → 15k (§8) | +0.91 | +0.31 |
+| LR-decay log-linear 1 → 0.01 on geometric params (§8) | **+1.87** | **+0.96** |
+| **Remaining gap to D3DGS** | **−1.37** | — |
+
+So of the original 3.24 dB gap, **~58% is now closed** (1.87 dB recovered;
+1.37 dB residual). The dominant single lever turned out to be the LR
+schedule, not appearance-DOF or count.
+
+### What's still unaccounted for (1.37 dB)
+
+The probes above used identical implementation/eval to D3DGS except for:
+
+- **3-plane projector vs explicit (scales, rotations).** Still untested;
+  requires the `cov3D_precomp` → `(scales, rotations)` switch in
+  `fast_rasterizer.py` plus a quaternion + scale parameterization on the
+  trainable side. Substantive code work.
+- **Densification thresholds & opacity reset cadence.** D3DGS uses
+  `densify_grad_threshold=2e-4` and `opacity_reset_interval=3000` over a
+  longer schedule; we're at `1e-5` / no opacity reset by default. Could
+  be A/B'd cheaply.
+- **MLP deformation vs linear-drift Schur.** Bound at ≤ 0.5 dB by §2/§3;
+  could account for some fraction of the 1.37 dB but not all.
+
+### Implementation note
+
+The LR scheduler is a simple log-linear decay applied to `(n, mu, L_raw)`
+parameter groups (color/opacity/SH stay constant — matches 3DGS). Added
+in `grassmann/training.py` as `TrainerConfig.lr_decay` with `--lr_decay`
+CLI flag in `train_mono.py` and `--lr-decay` in `train_modal.py`. Default
+1.0 preserves prior behavior; 0.01 reproduces this probe. ~15 LOC.
 
 ## Files
 
