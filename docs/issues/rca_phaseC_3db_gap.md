@@ -213,30 +213,92 @@ the menu in the earlier 2-hypothesis test.
    this scene: +0.02 dB for 2.27× N. Keeping `max_split_per_event=500` is
    correct. *Caveat:* untested whether SH3 + larger N is super-additive
    (D3DGS uses both).
-3. **Investigate the ≈ 2 dB residual** (next RCA round). Levers above sum
-   to ≤ 1.1 dB; gap to D3DGS is 2.64 dB after SH3. Untested candidates
-   (no rank claimed):
-   - **COLMAP-density init.** D3DGS bootstraps from dense COLMAP point clouds
-     (often 5-10× more points than NeRFies' shipped `points.npy`); init
-     density biases where capacity is allocated.
-   - **MLP deformation vs linear-drift Schur.** Motion-correlation here is
-     ~0, but that's correlation with magnitude — non-linear motion patterns
-     could still cost a uniform amount in expectation. Frame 194 (SH3 lift
-     ≈ 0, residual 6.80 dB) is a candidate test case.
-   - **Numerical Σ_3D lift (`sigma_3d_blur=1e-4`).** Per-frame additive
-     blur; D3DGS rasterizer doesn't do this. Likely small contribution
-     (1cm in scene units), but cheap to A/B.
-   - **3-plane projector vs explicit (scales, rotations).** The rasterizer
-     receives `cov3D_precomp` from us (rank-2 + ε I); D3DGS supplies
-     `(scales, rotations)` and the rasterizer builds the cov internally.
-     Different gradient paths, possibly different EWA scaling.
+3. **Investigate the ≈ 2 dB residual.** Three single-flag probes in §7
+   eliminated `sigma_3d_blur` and init-density as residual levers; the
+   remaining candidates require non-trivial code changes. See §7 for the
+   narrowed list (training schedule, iter budget, 3-plane projector vs
+   explicit `(scales, rotations)`).
 4. *(Defer)* Motion-model upgrade. Bound at ≤ 0.5 dB on slice-banana scale 8.
+
+## §7. Residual probes — what the ~2 dB is NOT
+
+Three single-flag A/B probes against the SH3 baseline (24.86 dB), 14k iters
+each, identical otherwise, evaluated apples-to-apples at scale 8 vs
+D3DGS GT. All numbers are mean PSNR over the 82 val frames.
+
+| probe | hypothesis tested | final N | PSNR | Δ vs SH3 | conclusion |
+|---|---|---|---|---|---|
+| `sigma_3d_blur=1e-5` (10× smaller) | rank-2 lift over-blurs detail | 37 832 | 24.56 | **−0.29 dB** | not the lever |
+| `sigma_3d_blur=1e-3` (10× larger) | rank-2 lift acts as natural-Gaussian regularizer | 37 835 | 24.58 | **−0.28 dB** | not the lever |
+| `init_points_multiplier=4` | sparse seed → poorly-allocated capacity | 79 338 | 24.53 | **−0.32 dB** | not the lever |
+
+The blur curve is symmetric: ±10× from the 1e-4 default cost ~0.3 dB
+either way. The clean symmetry is more likely "PSNR isn't sensitive to
+blur in this range" than "1e-4 is precisely optimal". Either way, blur
+is not where the residual lives. init_points_multiplier=4 lands N ≈ 80k
+(matching N3x's 86k) yet trails the unmultiplied SH3 by 0.32 dB —
+consistent with §6's finding that count is dead headroom on this scene
+even when SH3 is on.
+
+The spatial deficit shape (uniform 1.37× ratio across dyn/static regions
+in §1+§2) was unchanged by all three probes: blur=1e-5 went 1.41/1.41,
+init4x went 1.42/1.42 — same shape, slightly worse magnitude.
+
+### What's eliminated
+
+After these probes the residual is **not**:
+
+- numerical-lift miscalibration (`sigma_3d_blur` is robust at its current
+  value, not the cause)
+- sparse initialization (4× denser seed didn't help; matches §6's count
+  result that capacity-by-density is not the lever)
+- motion-modeling magnitude (already excluded by §2's correlation argument
+  + §3's uniform spatial deficit ratio of 1.37× / 1.37× across dyn/static)
+
+### What's still on the table
+
+Each of these would require a non-trivial code change (no longer
+single-flag), and the residual ~2 dB sits in some combination of them:
+
+- **Training schedule.** We use fixed LRs throughout 14k iters; D3DGS uses
+  exponential decay on `position_lr` (init 1.6e-4 → final 1.6e-6 over 30k
+  iters). At 14k under fixed LR our positional updates are ~10× larger
+  than D3DGS's at the same iter — could be over-stepping the local
+  optimum on geometry.
+- **Iteration budget.** D3DGS canonically trains 30k iters and densifies
+  through 15k; we're at 14k iters with `densify_stop=10000`. The internal
+  *train* PSNR was still climbing at iter 14000 in all SH3 runs (23.7 →
+  23.95 dB over the last 4k iters of fine-tuning); we have only one val
+  PSNR datapoint (iter 14000 = 23.55 dB internal) so cannot confirm the
+  val curve has plateaued. May be undertrained, may already be converged.
+- **3-plane projector vs explicit `(scales, rotations)`.** We feed
+  `cov3D_precomp` (rank-2 + ε I) to the rasterizer; D3DGS feeds
+  `(scales, rotations)` so the rasterizer builds the covariance from
+  trainable per-axis scales and a quaternion-derived rotation. Gradients
+  flow through different paths and EWA-clipping may interact differently
+  with our reduced-rank cov.
+
+### Next probe (if continuing)
+
+**Iter budget + densify schedule** A/B is the cheapest of the three to
+*run* (zero code changes; just `--num_iters 30000 --densify-stop 15000`),
+though it doesn't discriminate among the three candidates: a positive
+result confirms "undertrained" but a null result doesn't isolate LR
+schedule from parameterization. The structurally most informative probe
+would be the 3-plane → explicit `(scales, rotations)` switch — that one
+requires real code work and would tell us whether the parameterization
+itself is costing capacity. Pick by what kind of answer is wanted.
 
 ## Files
 
 - `/tmp/perframe_apples.json` — per-frame PSNR/L1 (raw)
 - `/tmp/perframe_motion.json` — same + per-frame motion proxies
-- `docs/issues/rca_phaseC_per_frame_psnr.png` — per-frame plot
+- `/tmp/perframe_n3x_apples.json` — N3x scale-8 eval (§6)
+- `/tmp/perframe_sh3_apples.json` — SH3 scale-8 eval (§6b)
+- `docs/issues/perframe_blur1e5_apples.json`,
+  `perframe_blur1e3_apples.json`, `perframe_init4x_apples.json` —
+  residual-probe scale-8 evals (§7)
+- `docs/issues/rca_phaseC_n3x_per_frame.png` — per-frame plot for §6/§6b
 - `docs/issues/heatmaps_apples/frame{0194,0122,0222}_topdeficit.png` —
   6-panel diff heatmaps for top-deficit frames
 - `scripts/rca_spectral.py` — spectral analysis
