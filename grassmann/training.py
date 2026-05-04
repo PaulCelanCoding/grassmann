@@ -97,6 +97,10 @@ class TrainerConfig:
     opacity_reset_every: int = 0
     opacity_reset_logit: float = -5.0
     lambda_aniso: float = 0.0
+    # Structural-loss kind: 'boxstats' (legacy 7x7 local-mean+var matcher) or
+    # 'ssim' (1 - SSIM Gaussian-windowed, matches 3DGS DSSIM term). Only
+    # active when lambda_structural > 0.
+    structural_kind: str = "boxstats"
 
 
 FrameData = Union[Tensor, Callable[[int, float], Tensor]]
@@ -242,6 +246,7 @@ class Trainer:
             rendered, target,
             lambda_l1=self.config.lambda_l1,
             lambda_structural=self.config.lambda_structural,
+            structural_kind=self.config.structural_kind,
             lpips_fn=self.lpips_fn,
             lambda_lpips=self.config.lambda_lpips,
         )

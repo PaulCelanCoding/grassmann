@@ -99,6 +99,72 @@ def test_init_random_produces_valid_gaussian(cameras_orbit):
     assert s[2].item() < 1e-10
 
 
+def test_init_orthogonal_axis_perpendicular_to_view_ray(cameras_orbit):
+    """orthogonal init must put rank-1 axis ⊥ view ray AND V_k exactly at X."""
+    from grassmann.gaussian import condition_on_time
+    torch.manual_seed(0)
+    X = torch.tensor([0.05, 0.02, 5.0], dtype=DTYPE)
+    t_val = 0.5
+    g = init_gaussian_from_point(
+        X, t=t_val, cameras=cameras_orbit,
+        strategy="orthogonal", observability_idx=[2],
+    )
+    assert g.p_im.shape == (1, 3)
+    derived = compute_derived(g)
+    # V_k must land exactly on X (no projection residual).
+    assert torch.allclose(derived.V_k[0], X, atol=1e-9), \
+        f"orthogonal V_k off-target: V_k={derived.V_k[0]}, X={X}"
+    assert abs(float(derived.v_0[0]) - t_val) < 1e-9
+    # Rank-1 axis must be perpendicular to view ray.
+    tc = condition_on_time(g, derived, t_0=t_val)
+    ev, vec = torch.linalg.eigh(tc.Sigma_3D_t[0])
+    top = vec[:, -1]
+    cam = cameras_orbit[2]
+    u = (X - cam.c) / (X - cam.c).norm()
+    assert abs(float((top * u).sum())) < 1e-6, \
+        f"orthogonal axis should be ⊥ view ray; got |cos|={abs(float((top*u).sum()))}"
+
+
+def test_init_tripod_emits_three_gaussians_with_orthogonal_axes(cameras_orbit):
+    """tripod init: 3 Gaussians per point with axes spanning R^3, all V_k = X."""
+    from grassmann.gaussian import condition_on_time
+    torch.manual_seed(0)
+    X = torch.tensor([0.05, 0.02, 5.0], dtype=DTYPE)
+    t_val = 0.5
+    g = init_gaussian_from_point(
+        X, t=t_val, cameras=cameras_orbit,
+        strategy="tripod", observability_idx=[2],
+    )
+    assert g.N == 3, f"tripod should produce 3 Gaussians per point; got {g.N}"
+    derived = compute_derived(g)
+    # All 3 V_k must equal X (no projection residual).
+    for i in range(3):
+        assert torch.allclose(derived.V_k[i], X, atol=1e-9), \
+            f"tripod Gaussian {i} V_k off-target: V_k={derived.V_k[i]}, X={X}"
+    tc = condition_on_time(g, derived, t_0=t_val)
+    axes = []
+    for i in range(3):
+        ev, vec = torch.linalg.eigh(tc.Sigma_3D_t[i])
+        axes.append(vec[:, -1])
+    # Mutually orthogonal axes (R^3 basis).
+    for i in range(3):
+        for j in range(i + 1, 3):
+            dot = abs(float((axes[i] * axes[j]).sum()))
+            assert dot < 1e-6, f"tripod axes {i},{j} not orthogonal: |cos|={dot}"
+
+
+def test_init_gaussians_from_points_tripod_triples_count(cameras_orbit):
+    """init_gaussians_from_points with strategy='tripod' must yield 3*N Gaussians."""
+    torch.manual_seed(0)
+    pts = torch.tensor([[0.05, 0.02, 5.0], [0.1, -0.1, 4.0]], dtype=DTYPE)
+    times = torch.tensor([0.3, 0.7], dtype=DTYPE)
+    obs = [[1, 2, 3], [0, 2, 4]]
+    g = init_gaussians_from_points(
+        pts, times, cameras_orbit, strategy="tripod", observability=obs,
+    )
+    assert g.N == 6, f"tripod over 2 points should give 6 Gaussians; got {g.N}"
+
+
 def test_init_birth_uses_observability_camera(cameras_orbit):
     """With strategy='birth' and observability=[3], the ref cam used must be 3."""
     torch.manual_seed(0)

@@ -113,11 +113,16 @@ def train(
         "--iterations", str(num_iters),
         "--resolution", str(resolution),
     ]
+    import time as _time
     print(f">>> {' '.join(train_argv)}", flush=True)
+    _t0 = _time.perf_counter()
     subprocess.run(train_argv, check=True, cwd=cwd)
+    _wall = _time.perf_counter() - _t0
+    print(f"TRAIN_WALL_S={_wall:.1f}", flush=True)
 
-    # Render test set
-    render_argv = ["python", "render.py", "-m", out_dir, "--mode", "original",
+    # Render test set (default render mode saves per-frame PNGs into
+    # test/ours_<iter>/renders/{00000.png,...} and gt/...)
+    render_argv = ["python", "render.py", "-m", out_dir,
                     "--resolution", str(resolution)]
     print(f">>> {' '.join(render_argv)}", flush=True)
     subprocess.run(render_argv, check=True, cwd=cwd)
@@ -130,16 +135,46 @@ def train(
     ckpt_vol.commit()
 
 
+@app.function(gpu=GPU, volumes=VOLUMES, timeout=1 * 3600)
+def render_only(
+    out_dir: str,
+    resolution: int,
+    scene: str = "slice-banana",
+) -> None:
+    """Re-render test set on an existing checkpoint dir (no training)."""
+    # Re-create the interp symlink that train() set up; render.py reads the
+    # source path from cfg_args and needs the dataset available.
+    _ensure_interp_layout(scene)
+    cwd = "/root/Deformable-3D-Gaussians"
+    render_argv = ["python", "render.py", "-m", out_dir,
+                    "--resolution", str(resolution)]
+    print(f">>> {' '.join(render_argv)}", flush=True)
+    subprocess.run(render_argv, check=True, cwd=cwd)
+    metrics_argv = ["python", "metrics.py", "-m", out_dir]
+    print(f">>> {' '.join(metrics_argv)}", flush=True)
+    subprocess.run(metrics_argv, check=True, cwd=cwd)
+    ckpt_vol.commit()
+
+
 @app.local_entrypoint()
 def main(
+    cmd: str = "train",
     scene: str = "slice-banana",
     iters: int = 14000,
     resolution: int = 4,
     run_tag: str = "",
+    out_dir: str = "",
 ):
-    train.remote(
-        scene=scene,
-        num_iters=iters,
-        resolution=resolution,
-        run_tag=run_tag,
-    )
+    if cmd == "train":
+        train.remote(
+            scene=scene,
+            num_iters=iters,
+            resolution=resolution,
+            run_tag=run_tag,
+        )
+    elif cmd == "render":
+        if not out_dir:
+            raise SystemExit("--cmd render requires --out-dir")
+        render_only.remote(out_dir=out_dir, resolution=resolution, scene=scene)
+    else:
+        raise SystemExit(f"unknown --cmd {cmd!r}")

@@ -169,6 +169,21 @@ def main():
                          "L_raw). 1.0 disables. <1 decays from base*1 to base*lr_decay "
                          "over num_iters via lr(t)=base*lr_decay**t. 3DGS uses 0.01 "
                          "(100x decay) over 30k iters.")
+    ap.add_argument("--lr_pos_scale", type=float, default=1.0,
+                    help="Multiplier on (lr_n, lr_mu, lr_L) initial values. 1.0 keeps "
+                         "defaults (1e-3, 5e-3, 5e-3). 0.2 -> 5x smaller; closer to "
+                         "D3DGS position_lr_init magnitude. Color/opacity LRs unaffected.")
+    ap.add_argument("--lambda_structural", type=float, default=0.2,
+                    help="Weight on the structural loss (local-mean + local-variance "
+                         "matching with a 7x7 box filter, see grassmann.losses). 0.2 "
+                         "matches the historical L1=0.8/structural=0.2 split. 0.0 -> "
+                         "pure L1.")
+    ap.add_argument("--structural_kind", choices=("boxstats", "ssim"),
+                    default="boxstats",
+                    help="Choice of structural-loss term. 'boxstats' is the legacy "
+                         "7x7 local-mean+var matcher (default, historical). 'ssim' is "
+                         "1 - SSIM with a Gaussian window — matches the 3DGS DSSIM "
+                         "structural term.")
     ap.add_argument("--sh_degree", type=int, default=0,
                     help="Spherical-harmonics band for per-Gaussian color. 0 keeps the "
                          "legacy constant-RGB path (color_logit). >0 swaps in sh_dc + "
@@ -280,8 +295,11 @@ def main():
         num_iters=args.num_iters,
         log_every=args.log_every,
         lambda_l1=0.8,
-        lambda_structural=0.2,
-        lr_n=1e-3, lr_mu=5e-3, lr_L=5e-3,
+        lambda_structural=args.lambda_structural,
+        structural_kind=args.structural_kind,
+        lr_n=1e-3 * args.lr_pos_scale,
+        lr_mu=5e-3 * args.lr_pos_scale,
+        lr_L=5e-3 * args.lr_pos_scale,
         lr_opacity=5e-2, lr_color=5e-2,
         background=torch.zeros(3, dtype=DTYPE, device=device),
         densify_every=args.densify_every,

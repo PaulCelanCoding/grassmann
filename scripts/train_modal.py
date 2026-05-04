@@ -61,8 +61,12 @@ GPU = "L4"
 
 
 def _run(argv: list[str]) -> None:
+    import time as _time
     print(f">>> {' '.join(argv)}", flush=True)
+    _t0 = _time.perf_counter()
     subprocess.run(argv, check=True, cwd="/root")
+    _wall = _time.perf_counter() - _t0
+    print(f"TRAIN_WALL_S={_wall:.1f}", flush=True)
 
 
 def _ensure_scene_unpacked(scene: str) -> str:
@@ -137,6 +141,9 @@ def train(
     opacity_prune_threshold: float,
     sh_degree: int,
     lr_decay: float,
+    lr_pos_scale: float,
+    lambda_structural: float,
+    structural_kind: str,
 ) -> None:
     scene_dir = _ensure_scene_unpacked(scene)
     suffix = f"-{run_tag}" if run_tag else ""
@@ -187,6 +194,12 @@ def train(
         argv += ["--sh_degree", str(sh_degree)]
     if lr_decay != 1.0:
         argv += ["--lr_decay", str(lr_decay)]
+    if lr_pos_scale != 1.0:
+        argv += ["--lr_pos_scale", str(lr_pos_scale)]
+    if lambda_structural != 0.2:
+        argv += ["--lambda_structural", str(lambda_structural)]
+    if structural_kind != "boxstats":
+        argv += ["--structural_kind", structural_kind]
     _run(argv)
     ckpt_vol.commit()
 
@@ -267,6 +280,9 @@ def main(
     opacity_prune_threshold: float = 1e-3,
     sh_degree: int = 0,
     lr_decay: float = 1.0,
+    lr_pos_scale: float = 1.0,
+    lambda_structural: float = 0.2,
+    structural_kind: str = "boxstats",
 ):
     """
     --cmd smoke:  short run (--iters used; default 500) at scale 4. Validates
@@ -304,6 +320,9 @@ def main(
             opacity_prune_threshold=opacity_prune_threshold,
             sh_degree=sh_degree,
             lr_decay=lr_decay,
+            lr_pos_scale=lr_pos_scale,
+            lambda_structural=lambda_structural,
+            structural_kind=structural_kind,
         )
     elif cmd == "train":
         train.remote(
@@ -334,6 +353,9 @@ def main(
             opacity_prune_threshold=opacity_prune_threshold,
             sh_degree=sh_degree,
             lr_decay=lr_decay,
+            lr_pos_scale=lr_pos_scale,
+            lambda_structural=lambda_structural,
+            structural_kind=structural_kind,
         )
     elif cmd == "render":
         if not ckpt:

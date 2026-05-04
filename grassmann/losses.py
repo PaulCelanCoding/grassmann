@@ -54,6 +54,48 @@ def _to_bchw(img: Tensor) -> Tensor:
     return img.permute(0, 3, 1, 2)                  # (B, 3, H, W)
 
 
+def _gaussian_kernel_1d(window: int, sigma: float, dtype: torch.dtype, device) -> Tensor:
+    half = (window - 1) / 2.0
+    x = torch.arange(window, dtype=dtype, device=device) - half
+    g = torch.exp(-(x ** 2) / (2.0 * sigma ** 2))
+    return g / g.sum()
+
+
+def ssim_loss(rendered: Tensor, target: Tensor, window: int = 11, sigma: float = 1.5) -> Tensor:
+    """1 - SSIM over the image, using the Gaussian-windowed SSIM as in 3DGS.
+
+    Matches the standard 3DGS structural-similarity loss: 11x11 Gaussian window
+    (sigma=1.5), C1=(0.01)^2, C2=(0.03)^2 on [0,1] images. Returns 1 - mean
+    SSIM (DSSIM convention used in 3DGS as the structural-loss term).
+
+    rendered, target: (H, W, 3) or (B, H, W, 3) in [0, 1].
+    """
+    r = _to_bchw(rendered)
+    t = _to_bchw(target)
+    dtype, device = r.dtype, r.device
+    k1d = _gaussian_kernel_1d(window, sigma, dtype, device)
+    kernel = (k1d[:, None] * k1d[None, :]).expand(3, 1, window, window).contiguous()
+    pad = window // 2
+
+    def conv(x: Tensor) -> Tensor:
+        return F.conv2d(F.pad(x, (pad, pad, pad, pad), mode="reflect"), kernel, groups=3)
+
+    mu_r = conv(r)
+    mu_t = conv(t)
+    mu_r2 = mu_r * mu_r
+    mu_t2 = mu_t * mu_t
+    mu_rt = mu_r * mu_t
+    sigma_r2 = conv(r * r) - mu_r2
+    sigma_t2 = conv(t * t) - mu_t2
+    sigma_rt = conv(r * t) - mu_rt
+    C1 = 0.01 ** 2
+    C2 = 0.03 ** 2
+    ssim_map = ((2.0 * mu_rt + C1) * (2.0 * sigma_rt + C2)) / (
+        (mu_r2 + mu_t2 + C1) * (sigma_r2 + sigma_t2 + C2)
+    )
+    return 1.0 - ssim_map.mean()
+
+
 def structural_loss(rendered: Tensor, target: Tensor, window: int = 7) -> Tensor:
     """Local-mean + local-variance matching, averaged over channels.
 
@@ -141,16 +183,24 @@ def photometric_loss(
     *,
     lambda_l1: float = 0.8,
     lambda_structural: float = 0.2,
+    structural_kind: str = "boxstats",
     lpips_fn: Optional[LPIPSLoss] = None,
     lambda_lpips: float = 0.0,
 ) -> Tensor:
     """Weighted sum of L1 + structural + optional LPIPS.
 
     rendered, target: (H, W, 3) or (B, H, W, 3) in [0, 1].
+    structural_kind: 'boxstats' (legacy 7x7 local-mean+var) or 'ssim'
+        (1 - SSIM, Gaussian-windowed, matches 3DGS).
     """
     loss = lambda_l1 * l1_loss(rendered, target)
     if lambda_structural > 0:
-        loss = loss + lambda_structural * structural_loss(rendered, target)
+        if structural_kind == "ssim":
+            loss = loss + lambda_structural * ssim_loss(rendered, target)
+        elif structural_kind == "boxstats":
+            loss = loss + lambda_structural * structural_loss(rendered, target)
+        else:
+            raise ValueError(f"unknown structural_kind: {structural_kind!r}")
     if lpips_fn is not None and lambda_lpips > 0:
         loss = loss + lambda_lpips * lpips_fn(rendered, target)
     return loss
