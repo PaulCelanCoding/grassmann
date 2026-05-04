@@ -39,6 +39,7 @@ from PIL import Image
 from grassmann.datasets.dycheck import load_dycheck
 from grassmann.datasets.nerfies import load_nerfies
 from grassmann.fast_rasterizer import FastRasterConfig, fast_rasterize
+from grassmann.surfel_rasterizer import SurfelRasterConfig, surfel_rasterize
 from grassmann.initialization import init_gaussians_from_points
 from grassmann.trainable import trainable_from_params
 
@@ -87,6 +88,10 @@ def main():
                          "3-plane parameterization) before the CUDA rasterizer. ε≈1e-4 "
                          "in scene units is enough for invertibility; larger values "
                          "become a meaningful blur.")
+    ap.add_argument("--rasterizer", choices=("gaussian", "surfel"), default="gaussian",
+                    help="Match the rasterizer used during training. 'surfel' routes "
+                         "through diff_surfel_rasterization (rank-2 native).")
+    ap.add_argument("--surfel_eigval_floor", type=float, default=1e-6)
     args = ap.parse_args()
 
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -143,6 +148,9 @@ def main():
     raster_cfg = FastRasterConfig(
         sigma_3d_blur=args.sigma_3d_blur, sh_degree=ckpt_sh_degree,
     )
+    surfel_cfg = SurfelRasterConfig(
+        sh_degree=ckpt_sh_degree, eigval_floor=args.surfel_eigval_floor,
+    )
 
     for f_idx in frame_idxs:
         cam = ds.cameras_per_frame[f_idx]
@@ -150,8 +158,12 @@ def main():
         params_now = model.forward()
 
         with torch.no_grad():
-            img = fast_rasterize(params_now, t_value, cam, ds.H, ds.W,
-                                 background=bg, config=raster_cfg)
+            if args.rasterizer == "surfel":
+                img = surfel_rasterize(params_now, t_value, cam, ds.H, ds.W,
+                                       background=bg, config=surfel_cfg)
+            else:
+                img = fast_rasterize(params_now, t_value, cam, ds.H, ds.W,
+                                     background=bg, config=raster_cfg)
 
         arr = (img.detach().cpu().numpy().clip(0, 1) * 255).astype(np.uint8)
         out_path = args.output_dir / f"render_frame{f_idx:04d}.png"

@@ -32,6 +32,12 @@ from .rasterizer import project_to_screen, rasterize
 from .trainable import TrainableGaussians, build_optimizer
 from .density_control import DensityTracker, DensityConfig
 from .fast_rasterizer import fast_rasterize, FastRasterConfig, is_available as fast_available
+from .surfel_rasterizer import (
+    surfel_rasterize, SurfelRasterConfig, is_available as surfel_available,
+)
+from .losses import (
+    depth_distortion_loss, normal_consistency_loss, depth_to_world_normal,
+)
 
 
 @dataclass
@@ -54,6 +60,9 @@ class TrainerConfig:
     lr_L: float = 5e-3
     lr_opacity: float = 5e-2
     lr_color: float = 2e-2
+    # v7-doc §7.5: per-axis μ-LR (only used when model.mu_lr_split=True).
+    lr_mu_spatial: float = 1e-4
+    lr_mu_time: float = 1e-3
     # Log-linear LR decay applied to geometric params (n, mu, L_raw) only.
     # 1.0 disables; <1 decays geometric LRs from base*1 to base*lr_decay over
     # num_iters via lr(t) = base * lr_decay**t. Mirrors 3DGS's position_lr_final/
@@ -97,10 +106,28 @@ class TrainerConfig:
     opacity_reset_every: int = 0
     opacity_reset_logit: float = -5.0
     lambda_aniso: float = 0.0
+    # μ-DOF probe: soft penalty on <n, mu>^2 (used when mu_constraint="penalty").
+    # 0 disables. See results/rca/mu_dof_ab_test.md and the GaussianParams
+    # mu_constraint docstring for the full A/B context.
+    lambda_mu_penalty: float = 0.0
     # Structural-loss kind: 'boxstats' (legacy 7x7 local-mean+var matcher) or
     # 'ssim' (1 - SSIM Gaussian-windowed, matches 3DGS DSSIM term). Only
     # active when lambda_structural > 0.
     structural_kind: str = "boxstats"
+    # Rasterizer choice: 'gaussian' (Inria diff_gaussian_rasterization, with
+    # σ_lift² rank-2→rank-3 lift) or 'surfel' (Huang2024 diff_surfel_rasterization,
+    # native rank-2 disk via ray-plane intersection). See results/rca/surfel_*
+    # for the A/B test.
+    rasterizer: str = "gaussian"
+    surfel_raster_config: Optional[SurfelRasterConfig] = None
+    # 2DGS regularizers — only meaningful when rasterizer == 'surfel'. Lambdas
+    # match 2DGS paper defaults; schedule activates after the listed iter.
+    use_2dgs_losses: bool = False
+    lambda_normal: float = 0.05
+    lambda_dist: float = 100.0
+    normal_after: int = 7000
+    dist_after: int = 3000
+    depth_ratio: float = 0.0  # 0 = expected depth (mip-NeRF-like), 1 = median (DTU)
 
 
 FrameData = Union[Tensor, Callable[[int, float], Tensor]]
@@ -146,6 +173,8 @@ class Trainer:
             lr_L=self.config.lr_L,
             lr_opacity=self.config.lr_opacity,
             lr_color=self.config.lr_color,
+            lr_mu_spatial=self.config.lr_mu_spatial,
+            lr_mu_time=self.config.lr_mu_time,
         )
         self.optimizer = self._build_opt(model)
         # Migration: density tracker may rebuild the optimizer mid-training.
@@ -196,33 +225,60 @@ class Trainer:
         return frame.to(device=self.model.n_raw.device)
 
     def render_one(self, cam_idx: int, t_value: float,
-                   means2d_capture: Optional[list] = None) -> Tensor:
+                   means2d_capture: Optional[list] = None,
+                   return_aux: bool = False):
         """Render the current model from camera cam_idx at time t_value.
 
         When `means2d_capture` is a list, the means2D dummy tensor (which gets
         screen-space gradients from the CUDA kernel after backward) is appended
         to it. Used by DensityTracker for the screen-space ‖∇μ_2d‖ trigger.
+
+        When `return_aux=True` and the surfel rasterizer is active, returns
+        (image, aux_dict) — aux contains 'rend_normal', 'rend_dist', etc. (see
+        grassmann.surfel_rasterizer.RENDER_PKG_KEYS). Otherwise returns image.
         """
         params = self.model.forward()
         bg = self.config.background.to(dtype=params.color.dtype, device=params.color.device)
+
+        if self.config.rasterizer == "surfel":
+            if not (surfel_available() and params.n.is_cuda):
+                raise RuntimeError(
+                    "rasterizer='surfel' requires diff_surfel_rasterization + CUDA"
+                )
+            sc = self.config.surfel_raster_config or SurfelRasterConfig()
+            out = surfel_rasterize(
+                params, t_value, self.cameras[cam_idx], self.H, self.W,
+                background=bg, config=sc,
+                static_baseline=self.config.static_baseline,
+                means2d_capture=means2d_capture,
+                return_aux=return_aux,
+            )
+            return out
+
         if self.config.use_fast_rasterizer and fast_available() and params.n.is_cuda:
             fc = self.config.fast_raster_config or FastRasterConfig()
-            return fast_rasterize(
+            img = fast_rasterize(
                 params, t_value, self.cameras[cam_idx], self.H, self.W,
                 background=bg, config=fc,
                 static_baseline=self.config.static_baseline,
                 means2d_capture=means2d_capture,
             )
+            return (img, None) if return_aux else img
         # Fallback: toy rasterizer path (also used when no GPU or no extension).
         if means2d_capture is not None:
             means2d_capture.append(None)
         derived = compute_derived(params)
         tc = condition_on_time(params, derived, t_value, static=self.config.static_baseline)
         sg = project_to_screen(params, tc, self.cameras[cam_idx])
-        return rasterize(sg, H=self.H, W=self.W, background=bg)
+        img = rasterize(sg, H=self.H, W=self.W, background=bg)
+        return (img, None) if return_aux else img
 
-    def train_step(self) -> tuple[float, float, float]:
-        """One stochastic training step. Returns (total loss, L1, PSNR_dB)."""
+    def train_step(self, iter_num: int = 0) -> tuple[float, float, float]:
+        """One stochastic training step. Returns (total loss, L1, PSNR_dB).
+
+        iter_num is the (1-based) current iteration; used to gate the 2DGS
+        depth-distortion / normal-consistency lambdas per the paper schedule.
+        """
         # Sample a frame.
         if self.config.monocular:
             # Monocular: one camera per frame, sampled together. self.K must equal self.T.
@@ -239,7 +295,17 @@ class Trainer:
         # tensor so the tracker can read screen-space gradients post-backward.
         means2d_capture: Optional[list] = [] if self.density_tracker is not None else None
         target = self.get_frame(cam_idx, t_idx).to(self.model.n_raw.dtype)
-        rendered = self.render_one(cam_idx, t_value, means2d_capture=means2d_capture)
+        # Surfel + 2DGS losses: pull aux maps from the rasterizer for
+        # depth-distortion / normal-consistency regularization.
+        want_aux = (self.config.rasterizer == "surfel"
+                    and self.config.use_2dgs_losses)
+        if want_aux:
+            rendered, aux = self.render_one(cam_idx, t_value,
+                                            means2d_capture=means2d_capture,
+                                            return_aux=True)
+        else:
+            rendered = self.render_one(cam_idx, t_value, means2d_capture=means2d_capture)
+            aux = None
 
         # Loss.
         loss = photometric_loss(
@@ -255,6 +321,39 @@ class Trainer:
             # Mean-squared L_raw entries; targets the soft-rank-collapse pathology
             # where the optimizer routes capacity into the projector's null direction.
             loss = loss + self.config.lambda_frob * (self.model.L_raw ** 2).mean()
+        if self.config.lambda_mu_penalty > 0.0:
+            # μ-DOF probe: soft penalty <n, μ>² (forward-pass n is unit-normalized).
+            n_unit = self.model.n_raw / self.model.n_raw.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+            if self.model.mu_lr_split:
+                mu_full = torch.cat([self.model.mu_time, self.model.mu_spatial], dim=-1)
+            else:
+                mu_full = self.model.mu
+            n_dot_mu = (n_unit * mu_full).sum(-1)
+            loss = loss + self.config.lambda_mu_penalty * (n_dot_mu ** 2).mean()
+        if aux is not None:
+            # 2DGS regularizers (gated by iter — paper defaults: dist@3000, normal@7000).
+            l_dist = self.config.lambda_dist if iter_num > self.config.dist_after else 0.0
+            l_norm = self.config.lambda_normal if iter_num > self.config.normal_after else 0.0
+            if l_dist > 0.0:
+                loss = loss + l_dist * depth_distortion_loss(aux["rend_dist"])
+            if l_norm > 0.0:
+                rend_alpha = aux["rend_alpha"]                  # (1, H, W)
+                # surf_depth = expected*(1-r) + median*r
+                exp_d = aux["expected_depth"] / rend_alpha.detach().clamp_min(1e-6)
+                exp_d = torch.nan_to_num(exp_d, nan=0.0, posinf=0.0, neginf=0.0)
+                med_d = torch.nan_to_num(aux["median_depth"], nan=0.0,
+                                         posinf=0.0, neginf=0.0)
+                surf_d = exp_d * (1 - self.config.depth_ratio) + \
+                         self.config.depth_ratio * med_d         # (1, H, W)
+                # rend_normal in allmap is view-space; rotate to world via R^T.
+                cam = self.cameras[cam_idx]
+                R_w = cam.R.to(device=aux["rend_normal"].device,
+                               dtype=aux["rend_normal"].dtype)
+                rend_n_view = aux["rend_normal"].permute(1, 2, 0)  # (H, W, 3)
+                rend_n_world = (rend_n_view @ R_w).permute(2, 0, 1) # (3, H, W)
+                surf_n_world = depth_to_world_normal(surf_d, cam).permute(2, 0, 1)
+                surf_n_world = surf_n_world * rend_alpha.detach()
+                loss = loss + l_norm * normal_consistency_loss(rend_n_world, surf_n_world)
         if self.config.lambda_aniso > 0.0:
             # Bounded anisotropy penalty on Σ_3D(t_0). We recompute Σ_3D_t inside
             # the model's forward graph by re-doing the projector + Schur — this
@@ -361,7 +460,7 @@ class Trainer:
                     if name in self._base_lrs:
                         group["lr"] = self._base_lrs[name] * scale
 
-            loss_val, l1_val, psnr_val = self.train_step()
+            loss_val, l1_val, psnr_val = self.train_step(iter_num=i)
             running_loss += loss_val
             running_l1 += l1_val
             running_psnr += psnr_val

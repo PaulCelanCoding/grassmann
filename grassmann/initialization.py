@@ -32,7 +32,8 @@ from .gaussian import GaussianParams
 DTYPE = torch.float64
 
 
-InitStrategy = Literal["lookat", "birth", "median", "random", "orthogonal", "tripod"]
+InitStrategy = Literal["lookat", "birth", "median", "random", "orthogonal", "tripod",
+                       "spatial_slice"]
 
 
 def _phase_b_only(name: str) -> None:
@@ -86,13 +87,18 @@ def init_gaussian_from_point(
     compatibility with the monocular dataset wiring but are unused for the
     `random` strategy (no ref camera dependence).
     """
-    if strategy != "random":
+    if strategy not in ("random", "spatial_slice"):
         _phase_b_only(strategy)
 
     if color is None:
         color = torch.full((3,), 0.5, dtype=DTYPE)
 
-    n, L_raw = _random_n_and_L(sigma_init_sq, generator=generator, dtype=DTYPE)
+    if strategy == "spatial_slice":
+        n = torch.zeros(4, dtype=DTYPE); n[0] = 1.0                       # n = e_0
+        sigma_L = (sigma_init_sq / 3.0) ** 0.5
+        L_raw = torch.randn(4, 3, dtype=DTYPE, generator=generator) * sigma_L
+    else:
+        n, L_raw = _random_n_and_L(sigma_init_sq, generator=generator, dtype=DTYPE)
     mu = torch.cat(
         [torch.tensor([float(t)], dtype=DTYPE), X_world.to(dtype=DTYPE)],
         dim=0,
@@ -128,7 +134,7 @@ def init_gaussians_from_points(
     Each row (points[i], times[i]) becomes one 3-plane Gaussian via the
     `random` strategy.
     """
-    if strategy != "random":
+    if strategy not in ("random", "spatial_slice"):
         _phase_b_only(strategy)
 
     N = points.shape[0]
@@ -145,8 +151,18 @@ def init_gaussians_from_points(
         generator.manual_seed(int(seed))
 
     sigma_L = (sigma_init_sq / 3.0) ** 0.5
-    n_all = torch.randn(N, 4, dtype=DTYPE, generator=generator)
-    n_all = n_all / n_all.norm(dim=-1, keepdim=True).clamp_min(1e-12)        # (N, 4)
+    if strategy == "spatial_slice":
+        # v7-doc default §7.2: n = e_0 for every Gaussian. The plane E_n is
+        # the spatial slice {x_0 = 0}; the Gaussian is rank-3 (a static-3DGS
+        # blob) at init and tilts into a dynamic disk via the bridge of
+        # Prop 5.3 only when the optimizer pushes n away from e_0.
+        # Requires the soft-clamp to avoid NaN at Sigma_tt_pure = 0; see
+        # `clamp_mode='soft'` in compute_derived / condition_on_time.
+        n_all = torch.zeros(N, 4, dtype=DTYPE)
+        n_all[:, 0] = 1.0                                                    # n = e_0
+    else:
+        n_all = torch.randn(N, 4, dtype=DTYPE, generator=generator)
+        n_all = n_all / n_all.norm(dim=-1, keepdim=True).clamp_min(1e-12)    # (N, 4)
     L_raw_all = torch.randn(N, 4, 3, dtype=DTYPE, generator=generator) * sigma_L  # (N, 4, 3)
     mu_all = torch.cat(
         [times.to(dtype=DTYPE).unsqueeze(-1), points.to(dtype=DTYPE)],

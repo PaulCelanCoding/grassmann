@@ -7,8 +7,16 @@ view-independent derived quantities the rasterizer needs.
 Each Gaussian is parameterized by:
   * n  in S^3                (3 DOF, plane normal in R^4)
   * L_raw  in R^(4x3)        (12 raw scalars; column space gets projected)
-  * mu in R^4                (mean in space-time; component along n is invisible
-                              after projection -> 3 effective DOF)
+  * mu in R^4                (mean in space-time; 4 effective DOF -- a shift
+                              μ -> μ + λn changes v_0 by λn_0 and V_k by
+                              λn_{1:}; invariance of V_3D(t_0) requires
+                              n_{1:} = (n_0/Σ_tt^pure) c_world while
+                              invariance of w_t requires n_0 = 0; combined
+                              they force n = 0, contradicting ‖n‖ = 1. A
+                              14k slice-banana A/B confirmed empirically
+                              that hard-projecting μ -> P_n μ regresses val
+                              PSNR by ~0.2 dB; see
+                              results/rca/mu_dof_ab_test.md.)
   * opacity in [0, 1]
   * color   in R^3           (constant RGB; used at sh_degree=0)
   * sh      in R^(K, 3)      (optional, K=(sh_degree+1)^2; used at sh_degree>0)
@@ -104,6 +112,21 @@ class GaussianParams:
     sigma_k_temporal: temporal blur added to Sigma_tt for the w_t weight only
                       (not for the Schur complement, so the rank-2 property
                       of Sigma_3D(t0) remains exact).
+    mu_constraint: how to handle the n-component of mu (DOF probe; see
+                   results/rca/mu_dof_ab_test.md). Values:
+                     "free"     -- mu has 4 effective DOF (default; legacy).
+                     "project"  -- compute_derived replaces mu with (I - nn^T)mu
+                                   before splitting v_0/V_k; gradient flows
+                                   through the projection, so the n-component
+                                   gradient is zero. mu has 3 effective DOF.
+                     "reparam"  -- TrainableGaussians.forward() returns the
+                                   projected mu directly. Same math as
+                                   "project" but the projection happens
+                                   upstream of compute_derived (any consumer
+                                   reading params.mu sees post-projected mu).
+                     "penalty"  -- mu stays free; trainer adds a soft
+                                   lambda_mu_penalty * <n, mu>^2 term to
+                                   the loss (set via TrainerConfig).
     """
     n: Tensor                       # (N, 4)
     L_raw: Tensor                   # (N, 4, 3)
@@ -114,6 +137,14 @@ class GaussianParams:
     sigma_k_temporal: float = 0.0
     sh: Optional[Tensor] = None     # (N, K, 3) where K=(sh_degree+1)^2; None at sh_degree=0
     sh_degree: int = 0              # 0 → use color; >0 → use sh
+    mu_constraint: str = "free"     # "free" | "project" | "reparam" | "penalty"
+    # v7-doc §5.1 soft-clamp probe: how to floor the temporal-axis denominators
+    # in the Schur step + w_t. "hard" (default, legacy): max(Σ_tt, eps_schur)
+    # via clamp_min, eps_schur=1e-20. "soft" (v7-doc Prop 5.3): replace Σ_tt
+    # with √(Σ_tt² + eps_schur²), eps_schur=1e-8. The soft-clamp is what
+    # makes the n=e_0 → tilted-disk transition C^∞-smooth at θ ~ √eps_schur.
+    clamp_mode: str = "hard"        # "hard" | "soft"
+    eps_schur: float = 1e-20        # default 1e-20 for hard; pass 1e-8 for soft
 
     @property
     def N(self) -> int:
@@ -168,6 +199,12 @@ def compute_derived(params: GaussianParams) -> DerivedQuantities:
     n = params.n                                          # (N, 4) unit
     L_raw = params.L_raw                                  # (N, 4, 3)
     mu = params.mu                                        # (N, 4)
+
+    # μ-DOF probe: optionally project mu onto n^⊥ before splitting.
+    # See GaussianParams.mu_constraint docstring + results/rca/mu_dof_ab_test.md.
+    if params.mu_constraint == "project":
+        n_dot_mu = (n * mu).sum(-1, keepdim=True)         # (N, 1)
+        mu = mu - n_dot_mu * n                            # (N, 4); n^T mu' = 0
 
     # L_plane = (I - n n^T) L_raw = L_raw - n (n^T L_raw)
     nL = torch.einsum("...i,...ij->...j", n, L_raw)       # (N, 3)
@@ -256,8 +293,16 @@ def condition_on_time(
     dt = t_0 - derived.v_0                                      # (N,)
 
     sigma_tt_pure = getattr(derived, "_sigma_tt_pure", derived.Sigma_tt)
-    eps = 1e-20
-    inv_Stt_pure = 1.0 / sigma_tt_pure.clamp_min(eps)            # (N,)
+    # v7-doc §5.1 clamp: hard = max(x, eps); soft = √(x² + eps²).
+    eps = float(params.eps_schur)
+    if params.clamp_mode == "soft":
+        # √(x² + ε²) ≥ ε always, smooth in x, identical to x for x ≫ ε.
+        Stt_pure_safe = torch.sqrt(sigma_tt_pure ** 2 + eps ** 2)
+        Stt_blur_safe = torch.sqrt(derived.Sigma_tt ** 2 + eps ** 2)
+    else:                                                        # "hard"
+        Stt_pure_safe = sigma_tt_pure.clamp_min(eps)
+        Stt_blur_safe = derived.Sigma_tt.clamp_min(eps)
+    inv_Stt_pure = 1.0 / Stt_pure_safe                           # (N,)
 
     shift = (dt * inv_Stt_pure).unsqueeze(-1) * derived.c_world  # (N, 3)
     V_3D_t = derived.V_k + shift                                 # (N, 3)
@@ -266,7 +311,7 @@ def condition_on_time(
     outer = cw.unsqueeze(-1) * cw.unsqueeze(-2)                  # (N, 3, 3)
     Sigma_3D_t = derived.Sigma_3D - inv_Stt_pure.unsqueeze(-1).unsqueeze(-1) * outer
 
-    inv_Stt_blur = 1.0 / derived.Sigma_tt.clamp_min(eps)
+    inv_Stt_blur = 1.0 / Stt_blur_safe
     w_t = torch.exp(-0.5 * dt * dt * inv_Stt_blur)               # (N,)
     alpha_eff = params.opacity * w_t                             # (N,)
 

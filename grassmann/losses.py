@@ -204,3 +204,76 @@ def photometric_loss(
     if lpips_fn is not None and lambda_lpips > 0:
         loss = loss + lambda_lpips * lpips_fn(rendered, target)
     return loss
+
+
+# ---- 2DGS regularizers (depth distortion + normal consistency) -------------
+#
+# These are gated by --use_2dgs_losses and only meaningful when rendering through
+# diff_surfel_rasterization (the channels rend_dist / rend_normal come from
+# allmap, see grassmann.surfel_rasterizer.RENDER_PKG_KEYS).
+#
+# Reference: Huang et al., "2D Gaussian Splatting for Geometrically Accurate
+# Radiance Fields", SIGGRAPH 2024, Eqs. 13-15.
+
+def depth_distortion_loss(rend_dist: Tensor) -> Tensor:
+    """2DGS Eq. 13: mean of the per-pixel ray-splat distortion map."""
+    return rend_dist.mean()
+
+
+def normal_consistency_loss(
+    rend_normal: Tensor,
+    surf_normal: Tensor,
+) -> Tensor:
+    """2DGS Eq. 14-15: 1 - <rend_normal, surf_normal> averaged over valid pixels.
+
+    Both normals are (3, H, W), unit-norm, in the same coordinate frame.
+    surf_normal is typically alpha-masked outside the silhouette.
+    """
+    dot = (rend_normal * surf_normal).sum(dim=0)            # (H, W)
+    return (1.0 - dot).mean()
+
+
+def depth_to_world_normal(
+    depth: Tensor,
+    cam,
+) -> Tensor:
+    """Back-project a depth map to world points and finite-difference for normals.
+
+    Adapted from 2DGS utils/point_utils.py:depth_to_normal but using our Camera
+    convention (`Camera.R`: world->camera, `Camera.c`: world-space cam center).
+
+    depth: (1, H, W) — surface-depth map (median or expected).
+    cam:   grassmann.projection.Camera
+
+    Returns: (H, W, 3) world-space surface normal (unit), zeroed at the boundary.
+    """
+    H, W = depth.shape[-2:]
+    device, dtype = depth.device, depth.dtype
+
+    # Build a (H, W, 3) per-pixel ray direction in world frame.
+    grid_y, grid_x = torch.meshgrid(
+        torch.arange(H, device=device, dtype=dtype),
+        torch.arange(W, device=device, dtype=dtype),
+        indexing="ij",
+    )
+    # Camera-frame ray dir at depth=1: ((u-cx)/fx, (v-cy)/fy, 1).
+    cam_x = (grid_x - cam.cx) / cam.fx
+    cam_y = (grid_y - cam.cy) / cam.fy
+    cam_z = torch.ones_like(cam_x)
+    ray_cam = torch.stack([cam_x, cam_y, cam_z], dim=-1)    # (H, W, 3)
+
+    # cam->world: world = c + R^T @ cam_point.
+    R = cam.R.to(device=device, dtype=dtype)
+    c = cam.c.to(device=device, dtype=dtype)
+    ray_world = ray_cam @ R                                  # (H, W, 3); R^T @ v == v @ R
+
+    points = depth.permute(1, 2, 0) * ray_world + c          # (H, W, 3)
+
+    # Finite-difference cross product (matches 2DGS).
+    output = torch.zeros_like(points)
+    dx = points[2:, 1:-1] - points[:-2, 1:-1]                # (H-2, W-2, 3) vertical
+    dy = points[1:-1, 2:] - points[1:-1, :-2]                # (H-2, W-2, 3) horizontal
+    n = torch.linalg.cross(dx, dy, dim=-1)
+    n = torch.nn.functional.normalize(n, dim=-1)
+    output[1:-1, 1:-1, :] = n
+    return output                                            # (H, W, 3) world-frame

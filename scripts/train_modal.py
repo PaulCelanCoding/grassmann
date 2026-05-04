@@ -47,6 +47,10 @@ image = (
         "git+https://github.com/graphdeco-inria/diff-gaussian-rasterization.git",
         gpu="L4",
     )
+    .pip_install(
+        "git+https://github.com/hbb1/diff-surfel-rasterization.git",
+        gpu="L4",
+    )
     .add_local_python_source("grassmann")
     .add_local_dir(str(REPO / "scripts"), remote_path="/root/scripts")
 )
@@ -144,6 +148,20 @@ def train(
     lr_pos_scale: float,
     lambda_structural: float,
     structural_kind: str,
+    mu_constraint: str,
+    lambda_mu_penalty: float,
+    clamp_mode: str,
+    eps_schur: float,
+    mu_lr_split: bool,
+    lr_mu_spatial: float,
+    lr_mu_time: float,
+    rasterizer: str,
+    use_2dgs_losses: bool,
+    lambda_normal: float,
+    lambda_dist: float,
+    surfel_eigval_floor: float,
+    surfel_sigma_3d_blur: float,
+    surfel_eigh_jitter: float,
 ) -> None:
     scene_dir = _ensure_scene_unpacked(scene)
     suffix = f"-{run_tag}" if run_tag else ""
@@ -200,6 +218,30 @@ def train(
         argv += ["--lambda_structural", str(lambda_structural)]
     if structural_kind != "boxstats":
         argv += ["--structural_kind", structural_kind]
+    if mu_constraint != "free":
+        argv += ["--mu_constraint", mu_constraint]
+    if lambda_mu_penalty != 1.0:
+        argv += ["--lambda_mu_penalty", str(lambda_mu_penalty)]
+    if clamp_mode != "hard":
+        argv += ["--clamp_mode", clamp_mode]
+    if eps_schur > 0:
+        argv += ["--eps_schur", str(eps_schur)]
+    if mu_lr_split:
+        argv += ["--mu_lr_split",
+                 "--lr_mu_spatial", str(lr_mu_spatial),
+                 "--lr_mu_time", str(lr_mu_time)]
+    if rasterizer != "gaussian":
+        argv += ["--rasterizer", rasterizer]
+    if use_2dgs_losses:
+        argv += ["--use_2dgs_losses",
+                 "--lambda_normal", str(lambda_normal),
+                 "--lambda_dist", str(lambda_dist)]
+    if surfel_eigval_floor != 1e-6:
+        argv += ["--surfel_eigval_floor", str(surfel_eigval_floor)]
+    if surfel_sigma_3d_blur > 0.0:
+        argv += ["--surfel_sigma_3d_blur", str(surfel_sigma_3d_blur)]
+    if surfel_eigh_jitter > 0.0:
+        argv += ["--surfel_eigh_jitter", str(surfel_eigh_jitter)]
     _run(argv)
     ckpt_vol.commit()
 
@@ -215,6 +257,7 @@ def render(
     allow_distortion: bool,
     side_by_side: bool,
     sigma_3d_blur: float,
+    rasterizer: str = "gaussian",
 ) -> None:
     import os
     scene_dir = _ensure_scene_unpacked(scene)
@@ -233,6 +276,8 @@ def render(
         "--device", "cuda",
         "--sigma_3d_blur", str(sigma_3d_blur),
     ]
+    if rasterizer != "gaussian":
+        argv += ["--rasterizer", rasterizer]
     if split is not None:
         argv += ["--split", split]
     if allow_distortion:
@@ -283,6 +328,20 @@ def main(
     lr_pos_scale: float = 1.0,
     lambda_structural: float = 0.2,
     structural_kind: str = "boxstats",
+    mu_constraint: str = "free",
+    lambda_mu_penalty: float = 1.0,
+    clamp_mode: str = "hard",
+    eps_schur: float = -1.0,
+    mu_lr_split: bool = False,
+    lr_mu_spatial: float = 1e-4,
+    lr_mu_time: float = 1e-3,
+    rasterizer: str = "gaussian",
+    use_2dgs_losses: bool = False,
+    lambda_normal: float = 0.05,
+    lambda_dist: float = 100.0,
+    surfel_eigval_floor: float = 1e-6,
+    surfel_sigma_3d_blur: float = 0.0,
+    surfel_eigh_jitter: float = 0.0,
 ):
     """
     --cmd smoke:  short run (--iters used; default 500) at scale 4. Validates
@@ -323,6 +382,20 @@ def main(
             lr_pos_scale=lr_pos_scale,
             lambda_structural=lambda_structural,
             structural_kind=structural_kind,
+            mu_constraint=mu_constraint,
+            lambda_mu_penalty=lambda_mu_penalty,
+            clamp_mode=clamp_mode,
+            eps_schur=eps_schur,
+            mu_lr_split=mu_lr_split,
+            lr_mu_spatial=lr_mu_spatial,
+            lr_mu_time=lr_mu_time,
+            rasterizer=rasterizer,
+            use_2dgs_losses=use_2dgs_losses,
+            lambda_normal=lambda_normal,
+            lambda_dist=lambda_dist,
+            surfel_eigval_floor=surfel_eigval_floor,
+            surfel_sigma_3d_blur=surfel_sigma_3d_blur,
+            surfel_eigh_jitter=surfel_eigh_jitter,
         )
     elif cmd == "train":
         train.remote(
@@ -356,6 +429,20 @@ def main(
             lr_pos_scale=lr_pos_scale,
             lambda_structural=lambda_structural,
             structural_kind=structural_kind,
+            mu_constraint=mu_constraint,
+            lambda_mu_penalty=lambda_mu_penalty,
+            clamp_mode=clamp_mode,
+            eps_schur=eps_schur,
+            mu_lr_split=mu_lr_split,
+            lr_mu_spatial=lr_mu_spatial,
+            lr_mu_time=lr_mu_time,
+            rasterizer=rasterizer,
+            use_2dgs_losses=use_2dgs_losses,
+            lambda_normal=lambda_normal,
+            lambda_dist=lambda_dist,
+            surfel_eigval_floor=surfel_eigval_floor,
+            surfel_sigma_3d_blur=surfel_sigma_3d_blur,
+            surfel_eigh_jitter=surfel_eigh_jitter,
         )
     elif cmd == "render":
         if not ckpt:
@@ -366,6 +453,7 @@ def main(
             split=split_arg, allow_distortion=allow_distortion,
             side_by_side=side_by_side,
             sigma_3d_blur=sigma_3d_blur,
+            rasterizer=rasterizer,
         )
     else:
         raise SystemExit(f"unknown --cmd {cmd!r}; expected smoke|train|render")

@@ -65,12 +65,32 @@ class TrainableGaussians(nn.Module):
         device: str = "cpu",
         learn_sigma_k_pixel: bool = False,
         sh_degree: int = 0,
+        mu_constraint: str = "free",
+        mu_lr_split: bool = False,
+        clamp_mode: str = "hard",
+        eps_schur: float = 1e-20,
     ):
         super().__init__()
         self.sh_degree = int(sh_degree)
+        self.mu_constraint = str(mu_constraint)
+        if self.mu_constraint not in ("free", "project", "reparam", "penalty"):
+            raise ValueError(f"Unknown mu_constraint={self.mu_constraint!r}")
+        self.mu_lr_split = bool(mu_lr_split)
+        self.clamp_mode = str(clamp_mode)
+        if self.clamp_mode not in ("hard", "soft"):
+            raise ValueError(f"Unknown clamp_mode={self.clamp_mode!r}")
+        self.eps_schur = float(eps_schur)
         self.n_raw = nn.Parameter(params.n.to(dtype=dtype, device=device))
         self.L_raw = nn.Parameter(params.L_raw.to(dtype=dtype, device=device))
-        self.mu = nn.Parameter(params.mu.to(dtype=dtype, device=device))
+        if self.mu_lr_split:
+            # v7-doc §7.5: per-axis LR for μ (spatial vs time). Stored as two
+            # nn.Parameters so the optimizer can give them separate LRs.
+            mu_init = params.mu.to(dtype=dtype, device=device)               # (N, 4)
+            self.mu_time = nn.Parameter(mu_init[:, 0:1].contiguous())        # (N, 1)
+            self.mu_spatial = nn.Parameter(mu_init[:, 1:].contiguous())      # (N, 3)
+            self.mu = None  # type: ignore[assignment] — explicitly disabled
+        else:
+            self.mu = nn.Parameter(params.mu.to(dtype=dtype, device=device))
 
         opacity_clamped = params.opacity.clamp(1e-6, 1.0 - 1e-6)
         opacity_logit = torch.log(opacity_clamped / (1.0 - opacity_clamped))
@@ -109,6 +129,18 @@ class TrainableGaussians(nn.Module):
         n_unit = self.n_raw / n_norm
         opacity = torch.sigmoid(self.opacity_logit)
 
+        # μ-DOF probe: "reparam" projects mu upstream of compute_derived so
+        # that any params.mu consumer sees the post-projected value.
+        if self.mu_lr_split:
+            mu_raw = torch.cat([self.mu_time, self.mu_spatial], dim=-1)      # (N, 4)
+        else:
+            mu_raw = self.mu
+        if self.mu_constraint == "reparam":
+            n_dot_mu = (n_unit * mu_raw).sum(-1, keepdim=True)
+            mu_eff = mu_raw - n_dot_mu * n_unit
+        else:
+            mu_eff = mu_raw
+
         sh: torch.Tensor | None
         if self.sh_degree == 0:
             color = torch.sigmoid(self.color_logit)
@@ -127,13 +159,16 @@ class TrainableGaussians(nn.Module):
         return GaussianParams(
             n=n_unit,
             L_raw=self.L_raw,
-            mu=self.mu,
+            mu=mu_eff,
             opacity=opacity,
             color=color,
             sigma_k_pixel=sigma_k_pixel_v,
             sigma_k_temporal=float(self.sigma_k_temporal_param.item()),
             sh=sh,
             sh_degree=self.sh_degree,
+            mu_constraint=self.mu_constraint,
+            clamp_mode=self.clamp_mode,
+            eps_schur=self.eps_schur,
         )
 
     def renormalize_manifold_(self) -> None:
@@ -151,12 +186,20 @@ def trainable_from_params(
     device: str = "cpu",
     learn_sigma_k_pixel: bool = False,
     sh_degree: int = 0,
+    mu_constraint: str = "free",
+    mu_lr_split: bool = False,
+    clamp_mode: str = "hard",
+    eps_schur: float = 1e-20,
 ) -> TrainableGaussians:
     """Convenience constructor."""
     return TrainableGaussians(
         params, dtype=dtype, device=device,
         learn_sigma_k_pixel=learn_sigma_k_pixel,
         sh_degree=sh_degree,
+        mu_constraint=mu_constraint,
+        mu_lr_split=mu_lr_split,
+        clamp_mode=clamp_mode,
+        eps_schur=eps_schur,
     )
 
 
@@ -173,19 +216,35 @@ def build_optimizer(
     lr_sh_dc: float = 2.5e-3,
     lr_sh_rest_ratio: float = 1.0 / 20.0,
     lr_sigma_k_pixel: float = 1e-2,
+    lr_mu_spatial: float = 1e-4,
+    lr_mu_time: float = 1e-3,
 ) -> torch.optim.Optimizer:
     """Adam with separate learning rates per parameter type, following the
     standard 3DGS setup. n is a unit-vector manifold parameter (smaller lr),
     mu and L_raw are scale-aware (intermediate), opacity/color are sigmoid
     logits (larger). When sh_degree > 0, color_logit is replaced by sh_dc and
     sh_rest, which use 3DGS-style LRs (rest = dc * 1/20).
+
+    When `model.mu_lr_split=True`, μ is stored as two parameters (mu_time,
+    mu_spatial) and the optimizer uses lr_mu_time / lr_mu_spatial for them
+    (v7-doc §7.5 default 1e-3 / 1e-4); the lr_mu argument is ignored.
     """
     param_groups = [
         {"params": [model.n_raw], "lr": lr_n, "name": "n"},
-        {"params": [model.mu], "lr": lr_mu, "name": "mu"},
         {"params": [model.L_raw], "lr": lr_L, "name": "L_raw"},
         {"params": [model.opacity_logit], "lr": lr_opacity, "name": "opacity"},
     ]
+    if model.mu_lr_split:
+        param_groups.append(
+            {"params": [model.mu_time], "lr": lr_mu_time, "name": "mu_time"}
+        )
+        param_groups.append(
+            {"params": [model.mu_spatial], "lr": lr_mu_spatial, "name": "mu_spatial"}
+        )
+    else:
+        param_groups.append(
+            {"params": [model.mu], "lr": lr_mu, "name": "mu"}
+        )
     if model.sh_degree == 0:
         param_groups.append(
             {"params": [model.color_logit], "lr": lr_color, "name": "color"}

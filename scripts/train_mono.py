@@ -35,6 +35,7 @@ from grassmann.datasets.dycheck import load_dycheck
 from grassmann.datasets.nerfies import load_nerfies
 from grassmann.density_control import DensityConfig
 from grassmann.fast_rasterizer import FastRasterConfig
+from grassmann.surfel_rasterizer import SurfelRasterConfig
 from grassmann.initialization import init_gaussians_from_points
 from grassmann.trainable import trainable_from_params
 from grassmann.training import Trainer, TrainerConfig
@@ -71,11 +72,12 @@ def main():
     ap.add_argument("--split", type=str, default=None,
                     help="DyCheck split name (e.g. 'train', 'common'). Ignored for nerfies.")
     ap.add_argument("--init_strategy",
-                    choices=("random",),
+                    choices=("random", "spatial_slice"),
                     default="random",
-                    help="Phase A only exposes 'random' (n ~ Uniform(S^3); L_raw ~ small "
-                         "isotropic Gaussian). Ray-aware strategies will be re-introduced "
-                         "in Phase B with semantically corrected geometry.")
+                    help="'random' (legacy): n ~ Uniform(S^3), L_raw small isotropic. "
+                         "'spatial_slice' (v7-doc §7.2): n = e_0 for every Gaussian, "
+                         "starting in the static-3DGS regime; tilts emerge during training "
+                         "via the bridge of Prop 5.3 (requires --clamp_mode=soft).")
     ap.add_argument("--num_iters", type=int, default=5000)
     ap.add_argument("--log_every", type=int, default=200)
     ap.add_argument("--use_fast_rasterizer", action="store_true")
@@ -184,6 +186,62 @@ def main():
                          "7x7 local-mean+var matcher (default, historical). 'ssim' is "
                          "1 - SSIM with a Gaussian window — matches the 3DGS DSSIM "
                          "structural term.")
+    ap.add_argument("--clamp_mode", choices=("hard", "soft"), default="hard",
+                    help="v7-doc §5.1 Schur denominator clamp. 'hard' (legacy): "
+                         "max(Σ_tt, eps), discontinuous gradient. 'soft' (v7-doc): "
+                         "√(Σ_tt² + eps²), C^∞-smooth — required for the n=e_0 "
+                         "init bridge of Prop 5.3.")
+    ap.add_argument("--eps_schur", type=float, default=-1.0,
+                    help="Schur denominator floor. -1 (default) auto-selects: "
+                         "1e-20 for clamp_mode=hard, 1e-8 for clamp_mode=soft "
+                         "(v7-doc default). Override with explicit value if needed.")
+    ap.add_argument("--mu_lr_split", action="store_true",
+                    help="v7-doc §7.5: split μ into mu_time and mu_spatial as "
+                         "two parameters with separate LRs (--lr_mu_time / "
+                         "--lr_mu_spatial). Default off keeps single μ + lr_mu.")
+    ap.add_argument("--lr_mu_spatial", type=float, default=1e-4,
+                    help="LR for mu_spatial when --mu_lr_split (v7-doc default 1e-4).")
+    ap.add_argument("--lr_mu_time", type=float, default=1e-3,
+                    help="LR for mu_time when --mu_lr_split (v7-doc default 1e-3).")
+    ap.add_argument("--mu_constraint",
+                    choices=("free", "project", "reparam", "penalty"),
+                    default="free",
+                    help="μ-DOF probe (results/rca/mu_dof_ab_test.md). 'free' "
+                         "(legacy): mu is unconstrained in R^4 (~4 effective DOF). "
+                         "'project': compute_derived projects mu onto n^⊥ before "
+                         "the time-split (3 DOF, hard constraint). 'reparam': "
+                         "TrainableGaussians.forward() returns the projected mu "
+                         "(same math as 'project', projection happens upstream). "
+                         "'penalty': mu free + soft loss term λ·<n,μ>² with "
+                         "λ=--lambda_mu_penalty.")
+    ap.add_argument("--lambda_mu_penalty", type=float, default=1.0,
+                    help="Strength of the soft <n,μ>² penalty when "
+                         "--mu_constraint=penalty. 1.0 default; ignored otherwise.")
+    # 2DGS A/B (results/rca/surfel_rasterizer_ab.md): swap diff-gaussian for
+    # diff-surfel, optionally enable depth-distortion + normal-consistency.
+    ap.add_argument("--rasterizer", choices=("gaussian", "surfel"), default="gaussian",
+                    help="'gaussian' = Inria diff_gaussian_rasterization (current default, "
+                         "needs σ_lift² rank-2→rank-3 lift). 'surfel' = Huang2024 "
+                         "diff_surfel_rasterization (native rank-2 disk, no lift).")
+    ap.add_argument("--use_2dgs_losses", action="store_true",
+                    help="Enable 2DGS depth-distortion + normal-consistency regularizers. "
+                         "Only meaningful with --rasterizer surfel. Schedule: dist@3000, normal@7000.")
+    ap.add_argument("--lambda_normal", type=float, default=0.05,
+                    help="2DGS normal-consistency lambda (paper default 0.05).")
+    ap.add_argument("--lambda_dist", type=float, default=100.0,
+                    help="2DGS depth-distortion lambda (paper: 100 indoor/object, 1000 unbounded).")
+    ap.add_argument("--surfel_eigval_floor", type=float, default=1e-6,
+                    help="Floor on smallest eigenvalue of Σ_3D(t₀) before sqrt; "
+                         "stabilizes eigh backward at exact rank-2 degeneracy.")
+    ap.add_argument("--surfel_sigma_3d_blur", type=float, default=0.0,
+                    help="Optional pre-eigh σ_lift² lift in the surfel path; "
+                         "tests whether σ_lift² acts as a hidden training regularizer "
+                         "in the gaussian path. 0=honest rank-2 (default); 1e-4 matches A1.")
+    ap.add_argument("--surfel_eigh_jitter", type=float, default=0.0,
+                    help="Anisotropic random jitter on Σ_3D before eigh. Breaks "
+                         "1/Δλ degeneracy in eigh backward at near-degenerate "
+                         "in-plane eigvals (~14% of Gaussians by p99 anisotropy). "
+                         "1e-5 to 1e-3 are reasonable.")
     ap.add_argument("--sh_degree", type=int, default=0,
                     help="Spherical-harmonics band for per-Gaussian color. 0 keeps the "
                          "legacy constant-RGB path (color_logit). >0 swaps in sh_dc + "
@@ -282,8 +340,16 @@ def main():
         sigma_k_temporal=0.0,
         seed=args.seed,
     )
+    eps_schur_resolved = (
+        args.eps_schur if args.eps_schur > 0
+        else (1e-8 if args.clamp_mode == "soft" else 1e-20)
+    )
     model = trainable_from_params(
         params, dtype=DTYPE, device=device, sh_degree=args.sh_degree,
+        mu_constraint=args.mu_constraint,
+        mu_lr_split=args.mu_lr_split,
+        clamp_mode=args.clamp_mode,
+        eps_schur=eps_schur_resolved,
     )
     if args.sh_degree > 0:
         print(f"  Model: {model.N} Gaussians on {device} (SH degree {args.sh_degree}, "
@@ -300,6 +366,8 @@ def main():
         lr_n=1e-3 * args.lr_pos_scale,
         lr_mu=5e-3 * args.lr_pos_scale,
         lr_L=5e-3 * args.lr_pos_scale,
+        lr_mu_spatial=args.lr_mu_spatial * args.lr_pos_scale,
+        lr_mu_time=args.lr_mu_time * args.lr_pos_scale,
         lr_opacity=5e-2, lr_color=5e-2,
         background=torch.zeros(3, dtype=DTYPE, device=device),
         densify_every=args.densify_every,
@@ -318,6 +386,16 @@ def main():
             sigma_3d_blur=args.sigma_3d_blur,
             sh_degree=args.sh_degree,
         ),
+        rasterizer=args.rasterizer,
+        surfel_raster_config=SurfelRasterConfig(
+            sh_degree=args.sh_degree,
+            eigval_floor=args.surfel_eigval_floor,
+            sigma_3d_blur=args.surfel_sigma_3d_blur,
+            eigh_jitter=args.surfel_eigh_jitter,
+        ),
+        use_2dgs_losses=args.use_2dgs_losses,
+        lambda_normal=args.lambda_normal,
+        lambda_dist=args.lambda_dist,
         validation_every=max(args.log_every, args.num_iters // 10),
         static_baseline=args.static_baseline,
         lambda_frob=args.lambda_frob,
@@ -325,6 +403,9 @@ def main():
         opacity_reset_logit=args.opacity_reset_logit,
         lambda_aniso=args.lambda_aniso,
         lr_decay=args.lr_decay,
+        lambda_mu_penalty=(
+            args.lambda_mu_penalty if args.mu_constraint == "penalty" else 0.0
+        ),
     )
     if val_indices_override is not None:
         cfg_kwargs["validation_frames"] = val_indices_override
