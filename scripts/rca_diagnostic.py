@@ -18,7 +18,7 @@ Inputs:
   --image_scale     resolution divisor (4)
   --output_dir      where to write the report + heatmaps
 
-Output: docs/issues/rca_phaseC_vs_d3dgs.md + diagnostic plots.
+Output: results/rca/phaseC_vs_d3dgs.md + diagnostic plots.
 """
 from __future__ import annotations
 
@@ -98,8 +98,8 @@ def main():
     ap.add_argument("--d3dgs_dir", type=Path, required=True)
     ap.add_argument("--scene_dir", type=Path, required=True)
     ap.add_argument("--image_scale", type=int, default=4)
-    ap.add_argument("--output_dir", type=Path, default=Path("docs/issues"))
-    ap.add_argument("--report_name", type=str, default="rca_phaseC_vs_d3dgs.md")
+    ap.add_argument("--output_dir", type=Path, default=Path("results/rca"))
+    ap.add_argument("--report_name", type=str, default="phaseC_vs_d3dgs.md")
     args = ap.parse_args()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)

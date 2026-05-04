@@ -42,7 +42,7 @@ changes when the parameterization is swapped under them.
 History: the legacy 2-plane G(2,4) parameterization (p, q in S^2, alpha_0,
 beta_0 in R, L in R^(2x2)) gave a rank-1 Sigma_3D(t0) which empirically
 plateaued at L1 ~ 0.108 on slice-banana (see
-docs/issues/monocular_streak_and_density_control.md). The 3-plane
+results/rca/monocular_streak_and_density_control.md). The 3-plane
 reformulation makes Sigma_3D(t0) rank-2 (a disk in 3D) and removes the
 view-axis-pinning pathology by construction.
 """

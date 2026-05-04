@@ -45,7 +45,7 @@ All 5 probes ran on Modal L4, 14k iters each, seed 42, otherwise identical to A1
 | B5 lowerlr5x | 47771 | 23.59 | **−2.44** | 0.039 | 17.7 ms | −7.3 | ~4.1 min | 0/82 | reject (under-trained) |
 | D3DGS reference | ~100k+ | 27.50 | residual = **−1.47** | 0.024 | — | — | — | — | — |
 
-Per-frame data: `docs/issues/perframe_14k_b{1..5}_*_apples.json`.
+Per-frame data: `perframe/perframe_14k_b{1..5}_*_apples.json`.
 
 ### Per-frame pattern: where each probe peaks vs A1
 
@@ -186,8 +186,8 @@ The SSIM swap is the single largest PSNR regression in the probe sweep besides B
 
 ## Files
 
-- This document: `docs/issues/rca_phaseC_14k_lrdecay_probes.md`
-- Per-frame JSONs: `docs/issues/perframe_14k_b{1..5}_*_apples.json`
+- This document: `results/rca/phaseC_14k_lrdecay_probes.md`
+- Per-frame JSONs: `results/rca/perframe/perframe_14k_b{1..5}_*_apples.json`
 - Modal logs: `/tmp/probe_b{1..5}_*.log`, `/tmp/render_b{1..5}_*.log`
 - Eval helper: `scripts/eval_apples.py`
-- Predecessor: `docs/issues/rca_phaseC_3db_gap.md` (full RCA up through §8)
+- Predecessor: `results/rca/phaseC_3db_gap.md` (full RCA up through §8)

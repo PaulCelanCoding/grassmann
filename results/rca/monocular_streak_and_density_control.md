@@ -174,4 +174,4 @@ same L1 with N = 14 k as we do with N = 23 k after splits.
 - Trainer: `grassmann/training.py`
 - Modal entrypoint for GPU runs: `scripts/train_modal.py`
 - Math spec: `docs/maths/grassmann.pdf`, `jacobian_v6.pdf`
-- Earlier RCA on a different bug: `docs/issues/rca_streak_collapse.md`
+- Earlier RCA on a different bug: `streak_collapse.md`

@@ -9,7 +9,7 @@ Phase A intentionally exposes only the `random` strategy:
     biasing the rank-2 disk toward any particular ray. Matches the empirical
     finding that random init was the only competitive strategy under the
     legacy 2-plane parameterization (see
-    docs/issues/monocular_streak_and_density_control.md).
+    results/rca/monocular_streak_and_density_control.md).
 
 The legacy ray-aware strategies (`lookat`, `birth`, `median`, `orthogonal`,
 `tripod`) targeted the rank-1 pathology and are no longer applicable under
@@ -39,7 +39,7 @@ def _phase_b_only(name: str) -> None:
     raise NotImplementedError(
         f"Init strategy {name!r} targets the legacy 2-plane parameterization and is not "
         f"applicable to the 3-plane (G(3,4)) projector form. Use 'random' for Phase A; "
-        f"see docs/issues/monocular_streak_and_density_control.md and the plan in "
+        f"see results/rca/monocular_streak_and_density_control.md and the plan in "
         f"~/.claude/plans/grassmann-splatting-on-imperative-rocket.md for the Phase B "
         f"re-introduction (`frontal` etc.)."
     )

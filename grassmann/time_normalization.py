@@ -6,7 +6,7 @@ Convention used by all datasets and trainers in this repo: time is a scalar in
 covariance parameter sigma_bb is then in (normalized-time)^2 units, so the
 default sigma_bb=0.05 corresponds to a temporal std-dev of about
 sqrt(0.05/2) = 0.16 of the timeline (~16% of the sequence). See
-docs/issues/rca_streak_collapse.md "Bug C" for the motivation: when times were
+results/rca/streak_collapse.md "Bug C" for the motivation: when times were
 frame indices in [0, T-1], the same default produced a sub-frame std-dev that
 made every Gaussian invisible outside its own frame.
 

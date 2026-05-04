@@ -94,7 +94,7 @@ The ratio of error (ours/D3DGS) is roughly 1.7× **in both regions**. By area
 A motion-modeling deficit would manifest as dynamic-region-dominated error.
 It doesn't.
 
-Heatmaps: `docs/issues/heatmaps_apples/frame{0194,0122,0222}_topdeficit.png`.
+Heatmaps: `heatmaps/frame{0194,0122,0222}_topdeficit.png`.
 
 ### 4. Spectral RCA: Phase C resolved the worst pathologies
 
@@ -153,7 +153,7 @@ vs SH3.
 
 Per-frame data: `/tmp/perframe_n3x_apples.json`.
 
-![per-frame PSNR baseline vs N3x vs D3DGS](rca_phaseC_n3x_per_frame.png)
+![per-frame PSNR baseline vs N3x vs D3DGS](figures/phaseC_n3x_per_frame.png)
 
 ### 6b. Appearance-DOF test (constant RGB → SH degree 3)
 
@@ -190,7 +190,7 @@ Per-frame data: `/tmp/perframe_sh3_apples.json`.
 
 ## Reconciliation with prior RCA
 
-`docs/issues/rca_3plane_low_psnr.md` (2026-05-03 morning) concluded
+`3plane_low_psnr.md` (2026-05-03 morning) concluded
 **motion-bound, not capacity-bound**, based on a single-frame fit at 29 dB
 plus a +0.7 dB N×4 test. The current §6 N3x test (+0.02 dB at 2.27× N) is
 the cleaner refutation of "count is the lever": the older N×4 test was at
@@ -404,7 +404,7 @@ spectral signature of **larger Gaussians acting as stronger low-pass
 filters** (Gaussian kernel of std σ has a Fourier transform falling off
 as exp(-σ²k²/2); larger σ = sharper roll-off).
 
-Plot: `docs/issues/rca_residual_fft.png`
+Plot: `figures/residual_fft.png`
 
 ### 9c. Gaussian size distribution (ours vs D3DGS PLY)
 
@@ -427,7 +427,7 @@ shape** differs sharply: D3DGS has a heavy tail of sub-pixel Gaussians
 (p25 = 0.015 px, p50 = 0.092 px, p75 = 0.59 px) while ours hits a hard
 floor at √ε ≈ 0.17 px. **Over half of D3DGS's Gaussians are thinner than
 the smallest Gaussian our parameterization can produce.** Plot:
-`docs/issues/rca_residual_size_dist.png`
+`figures/residual_size_dist.png`
 
 ### Synthesis (revised after §9d counter-check)
 
@@ -521,9 +521,9 @@ Two architectural directions:
    densification dynamics. ~1 day.
 
 Files:
-- `docs/issues/rca_residual_fft.png` — radial power spectrum
-- `docs/issues/rca_residual_size_dist.png` — size histograms
-- `/tmp/residual_decomp.json` — edge/flat L1 + HF loss numbers
+- `figures/residual_fft.png` — radial power spectrum
+- `figures/residual_size_dist.png` — size histograms
+- `perframe/residual_decomp.json` — edge/flat L1 + HF loss numbers
 
 ## §10. Yang 4DGS — architectural cousin to ours
 
@@ -616,7 +616,7 @@ clear: deformation-field methods (D3DGS, ours) outperform native 4D.
 - `scripts/train_modal_4dgs_yang.py` — Modal entrypoint (image build + train + render)
 - `scripts/yang_4dgs_patches/` — HyperNeRF reader, scene/__init__ branch, render.py, slice_banana.yaml, pointops2 stub
 - `scripts/eval_yang_apples.py` — apples-to-apples per-frame eval
-- `docs/issues/perframe_yang4dgs_apples.json` — per-frame PSNR/L1 (n=82, mean 22.06 dB, std 1.38 dB)
+- `perframe/perframe_yang4dgs_apples.json` — per-frame PSNR/L1 (n=82, mean 22.06 dB, std 1.38 dB)
 - Modal volume: `gs-checkpoints/yang4dgs-slice-banana-14000it/chkpnt7000.pth` (2.87 M Gaussians)
 
 ## Files
@@ -625,11 +625,11 @@ clear: deformation-field methods (D3DGS, ours) outperform native 4D.
 - `/tmp/perframe_motion.json` — same + per-frame motion proxies
 - `/tmp/perframe_n3x_apples.json` — N3x scale-8 eval (§6)
 - `/tmp/perframe_sh3_apples.json` — SH3 scale-8 eval (§6b)
-- `docs/issues/perframe_blur1e5_apples.json`,
-  `perframe_blur1e3_apples.json`, `perframe_init4x_apples.json` —
-  residual-probe scale-8 evals (§7)
-- `docs/issues/rca_phaseC_n3x_per_frame.png` — per-frame plot for §6/§6b
-- `docs/issues/heatmaps_apples/frame{0194,0122,0222}_topdeficit.png` —
+- `perframe/perframe_blur1e5_apples.json`,
+  `perframe/perframe_blur1e3_apples.json`,
+  `perframe/perframe_init4x_apples.json` — residual-probe scale-8 evals (§7)
+- `figures/phaseC_n3x_per_frame.png` — per-frame plot for §6/§6b
+- `heatmaps/frame{0194,0122,0222}_topdeficit.png` —
   6-panel diff heatmaps for top-deficit frames
 - `scripts/rca_spectral.py` — spectral analysis
 - `scripts/rca_diagnostic.py` — render evaluation pipeline

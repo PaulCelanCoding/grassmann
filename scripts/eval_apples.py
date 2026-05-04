@@ -5,7 +5,7 @@ deformable_interp val split (frames [2, 6, 10, ..., 326] -> j = 0..81).
 
 Usage:
     python scripts/eval_apples.py --renders ./renders/<run> \
-        --tag 14k_opreset3k --out docs/issues/perframe_14k_opreset3k_apples.json
+        --tag 14k_opreset3k --out results/rca/perframe/perframe_14k_opreset3k_apples.json
 """
 from __future__ import annotations
 import argparse

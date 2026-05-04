@@ -9,7 +9,8 @@ We are implementing docs/maths/. This works with monocular video data.
 - `tests/` — pytest (~144 tests)
 - `scripts/` — executables (run from any cwd; sys.path nudge included)
 - `viz/` — plot generators → `docs/images/`
-- `docs/images/` — generated PNGs
+- `docs/{images,maths}/` — math spec + generated PNGs from `viz/`
+- `results/rca/` — experimental RCA reports + per-frame JSONs + figures + heatmaps (see `results/README.md` for index)
 - `data/{nerfies,dycheck}/` — datasets (gitignored)
 - `legacy/multi_camera/` — archived N3DV/multi-cam stack (unsupported)
 
