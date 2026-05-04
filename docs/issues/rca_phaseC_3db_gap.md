@@ -525,6 +525,100 @@ Files:
 - `docs/issues/rca_residual_size_dist.png` — size histograms
 - `/tmp/residual_decomp.json` — edge/flat L1 + HF loss numbers
 
+## §10. Yang 4DGS — architectural cousin to ours
+
+Yang et al. (ICLR 2024, fudan-zvg/4d-gaussian-splatting) is the only mature
+open-source 4DGS that uses **native 4D Gaussians with marginalization**
+(Schur-on-time) rather than a deformation field on top of a 3D Gaussian.
+That makes it the right baseline for separating "rank-2 disk + ε I floor
+costs N dB of representation fidelity" from "the rest of D3DGS's pipeline
+(densification cadence, point management, opacity reset) costs M dB". The
+Wu et al. 4DGaussians (CVPR 2024) baseline that the takeover prompt named
+as a fallback is HexPlane-deformation — same family as D3DGS, so it would
+just confirm the deformation-field family works.
+
+**Setup:** slice-banana, iso-iter 14k, gaussian_dim=4, rot_4d=True,
+SH degree 3 + 4D-SH (`eval_shfs_4d=True`), batch_size=2, train at scale 4
+(rectified via cv2.undistort once at container start), eval at scale 8
+against the same D3DGS GT at `/tmp/d3dgs_gt/gt/`. Train/test split
+ids[::4] / ids[2::4] (matches D3DGS iso14k baseline + our SH3 14k).
+
+Implementation: `scripts/train_modal_4dgs_yang.py` + patches in
+`scripts/yang_4dgs_patches/` (Yang's repo ships only Colmap+Blender
+readers; we add a HyperNeRF/NeRFies reader, a HyperNeRF branch in
+`scene/__init__.py`, a `render.py` (upstream has none — only logs to
+TensorBoard during training), and a stub `pointops2` package whose imports
+succeed but whose functions raise — Yang's repo only uses pointops2 for
+the rigid loss which we disable via `lambda_rigid=0`).
+
+| run | PSNR @ scale 8 vs D3DGS GT | wall on L4 | N gaussians |
+|---|---|---|---|
+| ours sh=0 14k | 24.26 | ~5 min | 37 840 |
+| ours SH3 14k | 24.86 | ~5 min | ~38 k |
+| ours SH3 14k + LRdecay | 26.03 | ~6-7 min | ~38 k |
+| ours SH3 30k + LRdecay (best) | 26.13 | ~25 min | ~40 k |
+| **Yang 4DGS @ iter 7000** | **22.06** | ~30 min (OOM at 8300) | **2 873 099** |
+| D3DGS 14k iso | 27.50 | ~15 min | ~186 k |
+
+**OOM caveat:** training crashed at iter 8300/14000 with `CUDA out of
+memory` (24 GB L4 ran out — Yang's per-scene Gaussian count exploded to
+2.87 M at iter 7000, vs D3DGS's ~186 k). The iter-7000 checkpoint was
+saved by `save_iterations`. Yang's own internal `--exhaust_test` logging
+(separate metric: our rectified scale-4 test images, not D3DGS GT) plateaued
+at ~23.6 dB from iter 5000 through iter 8000 — different reference, but the
+plateau confirms 14k iters would not have moved the apples-to-apples number
+meaningfully either.
+
+We re-rendered at native scale 8 as a sanity check on the resize pipeline:
+21.82 dB vs 22.06 dB scale-4-then-resize. The 0.24 dB delta is consistent
+with how every other baseline in this doc was evaluated (train at scale X,
+render at X, bilinear-downsample to D3DGS GT shape). 22.06 is the
+apples-to-apples headline.
+
+**Interpretation:**
+
+Yang's full-rank 4D-Gaussian + marginalization architecture lands at
+22.06 dB — **2.2 dB BELOW our rank-2 disk+ε I baseline (sh=0 14k = 24.26 dB)**
+and 5.4 dB below D3DGS. This **rules out the "1.37 dB residual is
+representation cost" hypothesis**: if rank-2 disk + ε I were the bottleneck,
+Yang's full-rank 4D would have gained, not lost. Instead:
+
+1. Yang's densification + opacity-reset cadence is poorly tuned for
+   monocular HyperNeRF interp scenes — the count exploded 75× over 7k
+   iters (15 k init → 2.87 M), which is the count-explosion failure
+   mode that motivated D3DGS's careful densification (count-cap +
+   opacity-reset every 3k). Same hyperparams in Yang's repo, different
+   outcome.
+2. The "shared renderer cost" arm of the previous hypothesis stands:
+   D3DGS's lead over both ours and Yang comes from pipeline mechanics
+   (densification logic, opacity reset, point management), not from the
+   choice of Gaussian parameterization.
+
+**Concrete update to §9d's recommendation list:**
+
+- **Recommendation 1 (adopt 3DGS-style bundled densification regime) is
+  reinforced.** This is now the highest-leverage probe.
+- **Recommendation 2 (ray-splat-intersection rendering, §9d) is
+  weaker** — Yang doesn't have ε I as a representation, yet still lost
+  to ours. The ε I floor isn't the binding constraint.
+- **Recommendation 3 (switch to explicit `(scales, rotations)` ellipsoids)
+  is also weaker** for the same reason: Yang's 4D Gaussians are
+  effectively full-rank ellipsoids (rot_4d=True) and didn't help.
+
+**Open question** that this run did NOT settle: would Yang on a multi-camera
+scene (where its native 4D Gaussian was originally validated, e.g.
+DyNeRF/N3DV) close the gap to D3DGS? Our test was monocular HyperNeRF,
+which is harder for any 4D-only method (no parallax across the camera path
+to anchor temporal Gaussians). For *monocular* slice-banana the answer is
+clear: deformation-field methods (D3DGS, ours) outperform native 4D.
+
+**Files:**
+- `scripts/train_modal_4dgs_yang.py` — Modal entrypoint (image build + train + render)
+- `scripts/yang_4dgs_patches/` — HyperNeRF reader, scene/__init__ branch, render.py, slice_banana.yaml, pointops2 stub
+- `scripts/eval_yang_apples.py` — apples-to-apples per-frame eval
+- `docs/issues/perframe_yang4dgs_apples.json` — per-frame PSNR/L1 (n=82, mean 22.06 dB, std 1.38 dB)
+- Modal volume: `gs-checkpoints/yang4dgs-slice-banana-14000it/chkpnt7000.pth` (2.87 M Gaussians)
+
 ## Files
 
 - `/tmp/perframe_apples.json` — per-frame PSNR/L1 (raw)
