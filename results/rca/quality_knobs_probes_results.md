@@ -193,10 +193,66 @@ After Wave A produced Combo-A (+0.76), 10 retunes targeted the unexpectedly-fail
 
 A1 anchor at 413s was a cold start; warm-start probes finish in 220-330s. Runaway #4.2 v1 (1342s) is the only true outlier. **At fixed iters, the big winners (Combo-A v2, #4.2 thr=0.1) all pay ~2.2-2.3× capacity (50k Gaussians).**
 
-## Wave A.3 — stacking #4.2 thr=0.1 onto Combo-A
+## Wave A.3 — stacking #4.2 thr=0.1 onto Combo-A + #6 probes
 
-Pending probes:
-- **Combo-AA** = Combo-A v2 + #4.2 thr=0.1 → if additive: +1.26 dB
-- **Combo-AB** = Combo-A v1 + #4.2 thr=0.1 → comparison
-- **#6.1 SH-degree warmup** (sh_degree_warmup_step=1000) — single-flag
-- **#6.3 opacity-entropy reg** (λ=0.01) — single-flag
+| probe | flag(s) | val PSNR | Δ vs A1 | N | wall | verdict |
+|---|---|---|---|---|---|---|
+| **Combo-AA** | A v2 (relax 8k, aspect 30, rbg) + tsplit=0.1 | **24.36** | **+0.86** | **48033** | **283** | **NEW BEST OVERALL** |
+| Combo-AB | A v1 (relax 5k) + tsplit=0.1 | 24.25 | +0.75 | 54348 | 295 | weaker than AA |
+| #6.1 SH-warmup (step=1000) | `--sh_degree_warmup_step 1000` | 23.58 | +0.08 | 24693 | 236 | noise floor |
+| #6.3 opacity-entropy (λ=0.01) | `--lambda_opacity_entropy 0.01` | 23.57 | +0.07 | 21708 | 227 | noise floor |
+
+### Wave A.3 findings
+
+- **Combo-AA = +0.86 dB val (24.36) is the new best.** Adds tsplit=0.1 to Combo-A v2 for +0.06 dB on top of A v2's +0.80 — *not* additive (+0.46 single → +0.06 in combo) but **strictly dominates** A v2: better PSNR, smaller N (48k vs 52k), faster wall (283s vs 298s).
+- **#4.2 doesn't stack with grelax+aspect.** The capacity gains from temporal split overlap heavily with what the grelax + aspect-clip stack already captures. Adding it just refines the allocation slightly.
+- **#6.1 SH-degree warmup null** at step=1000 (sh_degree 0→3 over 3k iters). Would need different schedule — possibly a slower ramp (step=2000 → reaches 3 at iter 6k).
+- **#6.3 opacity entropy null** at λ=0.01. Possibly too weak; or the existing opacity-reset machinery already handles ghosts.
+
+## Final ranking — single-flag
+
+| rank | probe | Δ dB | N | wall (s) |
+|---|---|---|---|---|
+| 1 | **#4.2 thr=0.1** | **+0.46** | 53846 | 301 |
+| 2 | #3.2 grelax (spatial_slice + soft + relax 1k→5k) | +0.35 | 24677 | 238 |
+| 3 | #6.2 max_aspect_ratio=30 | +0.26 | 51172 | 328 |
+| 4 | #7.2 random_background | +0.20 | 26358 | 251 |
+| 5 | #5.2 color_lr_warmup_iter=1000 | +0.12 | 23188 | 234 |
+| 6 | #5.3 lambda_time_coherence=0.1 | +0.09 | 22016 | 255 |
+| 7 | #6.1 sh_degree_warmup_step=1000 | +0.08 | 24693 | 236 |
+| 8 | #6.3 lambda_opacity_entropy=0.01 | +0.07 | 21708 | 227 |
+| 9 | #2.1 pose-refine (any tested config) | +0.03 to +0.05 | 23425 | 241 |
+| 10 | #7.1 mip_filter_sigma_pixel (any) | +0.02 to +0.03 | 22896 | 235 |
+| 11 | #8.1 floater min_views=5 | −0.02 (PSNR) | **18148** | 215 |
+| 12 | #3.1 k-NN σ_init (any) | −0.08 to −0.10 | 21841 | 222 |
+| 13 | #1.1 per-frame exposure (any) | **−0.40 to −0.80** | 21347 | 314 |
+
+## Final ranking — combos
+
+| rank | combo | flags | Δ dB | N | wall (s) |
+|---|---|---|---|---|---|
+| 1 | **Combo-AA** | grelax(1k→8k) + aspect=30 + rbg + tsplit=0.1 | **+0.86** | **48033** | **283** |
+| 2 | Combo-A v2 | grelax(1k→8k) + aspect=30 + rbg | +0.80 | 51579 | 298 |
+| 3 | Combo-A v1 | grelax(1k→5k) + aspect=30 + rbg | +0.76 | 53726 | 322 |
+| 4 | Combo-AB | A v1 + tsplit=0.1 | +0.75 | 54348 | 295 |
+| 5 | Combo-B | A v1 + #5.2 color-warmup | +0.64 | 48749 | 288 |
+| 6 | Combo-C | aspect + rbg + warmup (no grelax) | +0.21 | 53253 | 352 |
+| ⊥ | Combo-D | A + warmup + floater | −0.10 | 12481 | 213 |
+
+## Recipe — recommended new default
+
+```bash
+modal run scripts/train_modal.py --cmd train \
+    --dataset nerfies --scene <scene> \
+    --iters 14000 \
+    --init-strategy spatial_slice \
+    --clamp-mode soft \
+    --grassmann-relax-start 1000 \
+    --grassmann-relax-end 8000 \
+    --max-aspect-ratio 30 \
+    --random-background \
+    --temporal-split-threshold 0.1 \
+    [other A1 flags: --sh-degree 3 --lr-decay 0.01 --densify-every 200 \
+     --grad-threshold 1e-5 --lambda-frob 1e-4 --lambda-aniso 1e-3 \
+     --val-stride 4 --split-convention deformable_interp]
+```
