@@ -92,6 +92,13 @@ class DensityConfig:
     # 0 disables.
     floater_min_views: int = 0
     floater_eps: float = 1e-3
+    # μ_t out-of-bounds prune (trigger_audit Bug C): drop Gaussians whose
+    # time-mean is outside the scene's [mu_t_min, mu_t_max] domain. NeRFies
+    # normalizes t to [0, 1]; defaults pad ±0.05 to avoid pruning Gaussians
+    # at the boundary that are actively contributing to t∈[0, 1].
+    # ±1e10 = effectively disabled.
+    mu_t_min: float = -1e10
+    mu_t_max: float = 1e10
 
     # ---- #4.1 3DGS-MCMC (Kheradmand NeurIPS 2024) ----------------------------
     # When density_strategy == "mcmc" the densify_and_prune() pass replaces
@@ -272,6 +279,12 @@ class DensityTracker:
             collapsed_mask = lam_min < config.scale_min
             runaway_mask = lam_max > config.scale_max
             drop_mask = low_op_mask | collapsed_mask | runaway_mask
+            # Bug C: μ_t out-of-bounds prune (default disabled via ±1e10 sentinels).
+            if config.mu_t_min > -1e9 or config.mu_t_max < 1e9:
+                mu_t = self.model.mu.data[..., 0] if self.model.mu is not None \
+                       else self.model.mu_time.data.squeeze(-1)
+                oob_mask = (mu_t < config.mu_t_min) | (mu_t > config.mu_t_max)
+                drop_mask = drop_mask | oob_mask
             # RCA diagnostic: opacity distribution (cheap, ~1 ms per call).
             qs = torch.quantile(
                 opacity,

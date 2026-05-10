@@ -145,6 +145,9 @@ def train(
     max_split_per_event: int,
     opacity_prune_threshold: float,
     scale_min_prune: float,
+    scale_max_prune: float,
+    mu_t_min: float,
+    mu_t_max: float,
     sh_degree: int,
     lr_decay: float,
     lr_pos_scale: float,
@@ -244,6 +247,12 @@ def train(
                  "--opacity_prune_threshold", str(opacity_prune_threshold)]
         if scale_min_prune != 1e-6:
             argv += ["--scale_min_prune", str(scale_min_prune)]
+        if scale_max_prune != 100.0:
+            argv += ["--scale_max_prune", str(scale_max_prune)]
+        if mu_t_min > -1e9:
+            argv += ["--mu_t_min", str(mu_t_min)]
+        if mu_t_max < 1e9:
+            argv += ["--mu_t_max", str(mu_t_max)]
         if max_split_per_event > 0:
             argv += ["--max_split_per_event", str(max_split_per_event)]
     if sh_degree > 0:
@@ -414,6 +423,9 @@ def main(
     max_split_per_event: int = 0,
     opacity_prune_threshold: float = 1e-3,
     scale_min_prune: float = 1e-6,
+    scale_max_prune: float = 100.0,
+    mu_t_min: float = -1e10,
+    mu_t_max: float = 1e10,
     sh_degree: int = 0,
     lr_decay: float = 1.0,
     lr_pos_scale: float = 1.0,
@@ -502,6 +514,9 @@ def main(
             max_split_per_event=max_split_per_event,
             opacity_prune_threshold=opacity_prune_threshold,
             scale_min_prune=scale_min_prune,
+            scale_max_prune=scale_max_prune,
+            mu_t_min=mu_t_min,
+            mu_t_max=mu_t_max,
             sh_degree=sh_degree,
             lr_decay=lr_decay,
             lr_pos_scale=lr_pos_scale,
@@ -582,6 +597,9 @@ def main(
             max_split_per_event=max_split_per_event,
             opacity_prune_threshold=opacity_prune_threshold,
             scale_min_prune=scale_min_prune,
+            scale_max_prune=scale_max_prune,
+            mu_t_min=mu_t_min,
+            mu_t_max=mu_t_max,
             sh_degree=sh_degree,
             lr_decay=lr_decay,
             lr_pos_scale=lr_pos_scale,

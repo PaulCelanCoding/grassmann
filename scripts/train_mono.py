@@ -312,6 +312,12 @@ def main():
                          "windows.")
     ap.add_argument("--floater_eps", type=float, default=1e-3,
                     help="#8.1: 'active' threshold on per-iter grad_norm.")
+    ap.add_argument("--mu_t_min", type=float, default=-1e10,
+                    help="trigger_audit Bug C: drop Gaussians with μ_t < this. "
+                         "Use ~-0.05 for NeRFies (t∈[0,1] with margin). 1e-10 disables.")
+    ap.add_argument("--mu_t_max", type=float, default=1e10,
+                    help="trigger_audit Bug C: drop Gaussians with μ_t > this. "
+                         "Use ~1.05 for NeRFies. 1e10 disables.")
     ap.add_argument("--sh_degree_warmup_step", type=int, default=0,
                     help="#6.1: increase eff_sh_degree by 1 every N iters "
                          "(capped at --sh_degree). 0 disables.")
@@ -524,6 +530,8 @@ def main():
             temporal_split_threshold=args.temporal_split_threshold,
             floater_min_views=args.floater_min_views,
             floater_eps=args.floater_eps,
+            mu_t_min=args.mu_t_min,
+            mu_t_max=args.mu_t_max,
             density_strategy=args.density_strategy,
             mcmc_noise_lr=args.mcmc_noise_lr,
             mcmc_noise_after=args.mcmc_noise_after,
