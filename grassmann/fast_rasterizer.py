@@ -203,6 +203,7 @@ def fast_rasterize(
     force_fallback: bool = False,
     means2d_capture: Optional[list] = None,
     static_baseline: bool = False,
+    sh_degree_override: Optional[int] = None,
 ) -> Tensor:
     """Render the current model using the CUDA 3DGS rasterizer if available,
     otherwise fall back to our toy rasterizer.
@@ -260,6 +261,10 @@ def fast_rasterize(
     proj_mat = camera_to_proj_matrix(cam_dev, H, W, config.znear, config.zfar)
     campos = cam_dev.c.to(dtype=dtype, device=device)
 
+    # #6.1 SH-degree warmup: effective sh_degree may be capped below the
+    # model's max during early iters. Higher-band coeffs stay at init (zero)
+    # because their gradient is zero until activated.
+    eff_sh_degree = config.sh_degree if sh_degree_override is None else sh_degree_override
     raster_settings = _GaussianRasterizationSettings(
         image_height=int(H),
         image_width=int(W),
@@ -269,7 +274,7 @@ def fast_rasterize(
         scale_modifier=config.scale_modifier,
         viewmatrix=view_mat,
         projmatrix=proj_mat,
-        sh_degree=config.sh_degree,
+        sh_degree=eff_sh_degree,
         campos=campos,
         prefiltered=config.prefiltered,
         debug=config.debug,

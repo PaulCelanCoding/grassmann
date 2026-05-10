@@ -144,6 +144,12 @@ class TrainerConfig:
     lr_pose_rot: float = 1e-5
     lr_pose_trans: float = 1e-4
     pose_warmup_iter: int = 2000
+    # #6.1 SH-degree warmup: increase eff_sh_degree by 1 every N iters
+    # (capped at model's max sh_degree). 0 disables (always max).
+    sh_degree_warmup_step: int = 0
+    # #6.3 opacity entropy regularizer: push α toward {0, 1}.
+    # Loss term: -λ · mean(α log α + (1-α) log(1-α)). 0 disables.
+    lambda_opacity_entropy: float = 0.0
     # Structural-loss kind: 'boxstats' (legacy 7x7 local-mean+var matcher) or
     # 'ssim' (1 - SSIM Gaussian-windowed, matches 3DGS DSSIM term). Only
     # active when lambda_structural > 0.
@@ -275,6 +281,8 @@ class Trainer:
                  "lr": self.config.lr_exposure, "name": "exposure_bias"}
             )
 
+        # #6.1 SH-degree warmup state.
+        self.current_iter: int = 0
         self.history: dict[str, list] = {"iter": [], "loss": [], "l1": [], "psnr": [], "N": []}
 
     # def get_frame(self, cam_idx: int, t_idx: int) -> Tensor:
@@ -355,11 +363,17 @@ class Trainer:
 
         if self.config.use_fast_rasterizer and fast_available() and params.n.is_cuda:
             fc = self.config.fast_raster_config or FastRasterConfig()
+            # #6.1 SH-degree warmup: cap effective sh_degree per current iter.
+            sh_override = None
+            warmup_step = self.config.sh_degree_warmup_step
+            if warmup_step > 0:
+                sh_override = min(fc.sh_degree, self.current_iter // warmup_step)
             img = fast_rasterize(
                 params, t_value, self._perturbed_camera(cam_idx), self.H, self.W,
                 background=bg, config=fc,
                 static_baseline=self.config.static_baseline,
                 means2d_capture=means2d_capture,
+                sh_degree_override=sh_override,
             )
             return (img, None) if return_aux else img
         # Fallback: toy rasterizer path (also used when no GPU or no extension).
@@ -377,6 +391,7 @@ class Trainer:
         iter_num is the (1-based) current iteration; used to gate the 2DGS
         depth-distortion / normal-consistency lambdas per the paper schedule.
         """
+        self.current_iter = iter_num
         # Sample a frame.
         if self.config.monocular:
             # Monocular: one camera per frame, sampled together. self.K must equal self.T.
@@ -486,6 +501,12 @@ class Trainer:
             from .gaussian import compute_derived, condition_on_time
             params_now = self.model.forward()
             d = compute_derived(params_now)
+        # #6.3 opacity entropy reg: push α toward {0, 1}.
+        if self.config.lambda_opacity_entropy > 0.0:
+            alpha = torch.sigmoid(self.model.opacity_logit).clamp(1e-6, 1 - 1e-6)
+            ent = -(alpha * torch.log(alpha) + (1 - alpha) * torch.log(1 - alpha))
+            loss = loss + self.config.lambda_opacity_entropy * ent.mean()
+
         if self.config.lambda_aniso > 0.0:
             # Bounded anisotropy penalty on Σ_3D(t_0). We recompute Σ_3D_t inside
             # the model's forward graph by re-doing the projector + Schur — this

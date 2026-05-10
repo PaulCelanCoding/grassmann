@@ -186,6 +186,8 @@ def train(
     grassmann_relax_end: int,
     floater_min_views: int,
     floater_eps: float,
+    sh_degree_warmup_step: int,
+    lambda_opacity_entropy: float,
 ) -> None:
     scene_dir = _ensure_scene_unpacked(scene)
     suffix = f"-{run_tag}" if run_tag else ""
@@ -304,6 +306,10 @@ def train(
     if floater_min_views > 0:
         argv += ["--floater_min_views", str(floater_min_views),
                  "--floater_eps", str(floater_eps)]
+    if sh_degree_warmup_step > 0:
+        argv += ["--sh_degree_warmup_step", str(sh_degree_warmup_step)]
+    if lambda_opacity_entropy > 0:
+        argv += ["--lambda_opacity_entropy", str(lambda_opacity_entropy)]
     _run(argv)
     ckpt_vol.commit()
 
@@ -428,6 +434,8 @@ def main(
     grassmann_relax_end: int = 0,
     floater_min_views: int = 0,
     floater_eps: float = 1e-3,
+    sh_degree_warmup_step: int = 0,
+    lambda_opacity_entropy: float = 0.0,
 ):
     """
     --cmd smoke:  short run (--iters used; default 500) at scale 4. Validates
@@ -505,6 +513,8 @@ def main(
             grassmann_relax_end=grassmann_relax_end,
             floater_min_views=floater_min_views,
             floater_eps=floater_eps,
+            sh_degree_warmup_step=sh_degree_warmup_step,
+            lambda_opacity_entropy=lambda_opacity_entropy,
         )
     elif cmd == "train":
         train.remote(
@@ -575,6 +585,8 @@ def main(
             grassmann_relax_end=grassmann_relax_end,
             floater_min_views=floater_min_views,
             floater_eps=floater_eps,
+            sh_degree_warmup_step=sh_degree_warmup_step,
+            lambda_opacity_entropy=lambda_opacity_entropy,
         )
     elif cmd == "render":
         if not ckpt:

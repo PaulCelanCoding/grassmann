@@ -312,6 +312,11 @@ def main():
                          "windows.")
     ap.add_argument("--floater_eps", type=float, default=1e-3,
                     help="#8.1: 'active' threshold on per-iter grad_norm.")
+    ap.add_argument("--sh_degree_warmup_step", type=int, default=0,
+                    help="#6.1: increase eff_sh_degree by 1 every N iters "
+                         "(capped at --sh_degree). 0 disables.")
+    ap.add_argument("--lambda_opacity_entropy", type=float, default=0.0,
+                    help="#6.3: opacity-entropy reg weight. Pushes α to {0, 1}.")
     ap.add_argument("--sh_degree", type=int, default=0,
                     help="Spherical-harmonics band for per-Gaussian color. 0 keeps the "
                          "legacy constant-RGB path (color_logit). >0 swaps in sh_dc + "
@@ -535,6 +540,8 @@ def main():
         refine_poses=args.refine_poses,
         lr_pose_rot=args.lr_pose_rot,
         lr_pose_trans=args.lr_pose_trans,
+        sh_degree_warmup_step=args.sh_degree_warmup_step,
+        lambda_opacity_entropy=args.lambda_opacity_entropy,
         pose_warmup_iter=args.pose_warmup_iter,
     )
     if val_indices_override is not None:
