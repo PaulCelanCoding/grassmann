@@ -54,7 +54,7 @@ Sorted by Δ. Each probe = A1 recipe + one new flag.
 | #8.1 floater multi-view (≥5 views) | 23.48 | −0.02 | 24.27 | **18148** | 215 | null on Δ; capacity-efficient |
 | #3.1 k-NN σ_init (k=3, α_t=0.1) | 23.40 | −0.10 | 24.16 | 21855 | 233 | regression |
 | #1.1 per-frame exposure | **22.70** | **−0.80** | 24.21 | 21412 | 248 | strong regression — needs hyperparam tune |
-| #4.2 temporal-axis split (Σ_tt > 0.01) | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ |
+| #4.2 temporal-axis split (Σ_tt > 0.01) | 23.79 | +0.29 | 30.29 | **435348** | 1342 | gain but 19× N — threshold too loose |
 
 ### Notable observations
 
