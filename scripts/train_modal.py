@@ -162,6 +162,30 @@ def train(
     surfel_eigval_floor: float,
     surfel_sigma_3d_blur: float,
     surfel_eigh_jitter: float,
+    init_points_path: str,
+    init_colors_path: str,
+    # --- Wave A probe flags (quality_knobs_evaluation.md) ---
+    color_lr_warmup_iter: int,
+    random_background: bool,
+    sigma_init_knn_k: int,
+    sigma_init_alpha_t: float,
+    max_aspect_ratio: float,
+    exposure_per_frame: bool,
+    lambda_exposure_reg: float,
+    temporal_split_threshold: float,
+    lambda_time_coherence: float,
+    time_coherence_dt: float,
+    mip_filter_sigma_pixel: float,
+    refine_poses: bool,
+    lr_pose_rot: float,
+    lr_pose_trans: float,
+    pose_warmup_iter: int,
+    lambda_depth: float,
+    depth_model: str,
+    grassmann_relax_start: int,
+    grassmann_relax_end: int,
+    floater_min_views: int,
+    floater_eps: float,
 ) -> None:
     scene_dir = _ensure_scene_unpacked(scene)
     suffix = f"-{run_tag}" if run_tag else ""
@@ -242,6 +266,44 @@ def train(
         argv += ["--surfel_sigma_3d_blur", str(surfel_sigma_3d_blur)]
     if surfel_eigh_jitter > 0.0:
         argv += ["--surfel_eigh_jitter", str(surfel_eigh_jitter)]
+    if init_points_path:
+        argv += ["--init_points_path", init_points_path]
+    if init_colors_path:
+        argv += ["--init_colors_path", init_colors_path]
+    # --- Wave A probe flags ---
+    if color_lr_warmup_iter > 0:
+        argv += ["--color_lr_warmup_iter", str(color_lr_warmup_iter)]
+    if random_background:
+        argv += ["--random_background"]
+    if sigma_init_knn_k > 0:
+        argv += ["--sigma_init_knn_k", str(sigma_init_knn_k),
+                 "--sigma_init_alpha_t", str(sigma_init_alpha_t)]
+    if max_aspect_ratio > 0:
+        argv += ["--max_aspect_ratio", str(max_aspect_ratio)]
+    if exposure_per_frame:
+        argv += ["--exposure_per_frame",
+                 "--lambda_exposure_reg", str(lambda_exposure_reg)]
+    if temporal_split_threshold > 0:
+        argv += ["--temporal_split_threshold", str(temporal_split_threshold)]
+    if lambda_time_coherence > 0:
+        argv += ["--lambda_time_coherence", str(lambda_time_coherence),
+                 "--time_coherence_dt", str(time_coherence_dt)]
+    if mip_filter_sigma_pixel > 0:
+        argv += ["--mip_filter_sigma_pixel", str(mip_filter_sigma_pixel)]
+    if refine_poses:
+        argv += ["--refine_poses",
+                 "--lr_pose_rot", str(lr_pose_rot),
+                 "--lr_pose_trans", str(lr_pose_trans),
+                 "--pose_warmup_iter", str(pose_warmup_iter)]
+    if lambda_depth > 0:
+        argv += ["--lambda_depth", str(lambda_depth),
+                 "--depth_model", depth_model]
+    if grassmann_relax_end > 0:
+        argv += ["--grassmann_relax_start", str(grassmann_relax_start),
+                 "--grassmann_relax_end", str(grassmann_relax_end)]
+    if floater_min_views > 0:
+        argv += ["--floater_min_views", str(floater_min_views),
+                 "--floater_eps", str(floater_eps)]
     _run(argv)
     ckpt_vol.commit()
 
@@ -342,6 +404,30 @@ def main(
     surfel_eigval_floor: float = 1e-6,
     surfel_sigma_3d_blur: float = 0.0,
     surfel_eigh_jitter: float = 0.0,
+    init_points_path: str = "",
+    init_colors_path: str = "",
+    # --- Wave A probe flags (quality_knobs_evaluation.md) ---
+    color_lr_warmup_iter: int = 0,
+    random_background: bool = False,
+    sigma_init_knn_k: int = 0,
+    sigma_init_alpha_t: float = 0.1,
+    max_aspect_ratio: float = 0.0,
+    exposure_per_frame: bool = False,
+    lambda_exposure_reg: float = 1e-3,
+    temporal_split_threshold: float = 0.0,
+    lambda_time_coherence: float = 0.0,
+    time_coherence_dt: float = 0.05,
+    mip_filter_sigma_pixel: float = 0.0,
+    refine_poses: bool = False,
+    lr_pose_rot: float = 1e-5,
+    lr_pose_trans: float = 1e-4,
+    pose_warmup_iter: int = 2000,
+    lambda_depth: float = 0.0,
+    depth_model: str = "depth_anything_v2_small",
+    grassmann_relax_start: int = 0,
+    grassmann_relax_end: int = 0,
+    floater_min_views: int = 0,
+    floater_eps: float = 1e-3,
 ):
     """
     --cmd smoke:  short run (--iters used; default 500) at scale 4. Validates
@@ -396,6 +482,29 @@ def main(
             surfel_eigval_floor=surfel_eigval_floor,
             surfel_sigma_3d_blur=surfel_sigma_3d_blur,
             surfel_eigh_jitter=surfel_eigh_jitter,
+            init_points_path=init_points_path,
+            init_colors_path=init_colors_path,
+            color_lr_warmup_iter=color_lr_warmup_iter,
+            random_background=random_background,
+            sigma_init_knn_k=sigma_init_knn_k,
+            sigma_init_alpha_t=sigma_init_alpha_t,
+            max_aspect_ratio=max_aspect_ratio,
+            exposure_per_frame=exposure_per_frame,
+            lambda_exposure_reg=lambda_exposure_reg,
+            temporal_split_threshold=temporal_split_threshold,
+            lambda_time_coherence=lambda_time_coherence,
+            time_coherence_dt=time_coherence_dt,
+            mip_filter_sigma_pixel=mip_filter_sigma_pixel,
+            refine_poses=refine_poses,
+            lr_pose_rot=lr_pose_rot,
+            lr_pose_trans=lr_pose_trans,
+            pose_warmup_iter=pose_warmup_iter,
+            lambda_depth=lambda_depth,
+            depth_model=depth_model,
+            grassmann_relax_start=grassmann_relax_start,
+            grassmann_relax_end=grassmann_relax_end,
+            floater_min_views=floater_min_views,
+            floater_eps=floater_eps,
         )
     elif cmd == "train":
         train.remote(
@@ -443,6 +552,29 @@ def main(
             surfel_eigval_floor=surfel_eigval_floor,
             surfel_sigma_3d_blur=surfel_sigma_3d_blur,
             surfel_eigh_jitter=surfel_eigh_jitter,
+            init_points_path=init_points_path,
+            init_colors_path=init_colors_path,
+            color_lr_warmup_iter=color_lr_warmup_iter,
+            random_background=random_background,
+            sigma_init_knn_k=sigma_init_knn_k,
+            sigma_init_alpha_t=sigma_init_alpha_t,
+            max_aspect_ratio=max_aspect_ratio,
+            exposure_per_frame=exposure_per_frame,
+            lambda_exposure_reg=lambda_exposure_reg,
+            temporal_split_threshold=temporal_split_threshold,
+            lambda_time_coherence=lambda_time_coherence,
+            time_coherence_dt=time_coherence_dt,
+            mip_filter_sigma_pixel=mip_filter_sigma_pixel,
+            refine_poses=refine_poses,
+            lr_pose_rot=lr_pose_rot,
+            lr_pose_trans=lr_pose_trans,
+            pose_warmup_iter=pose_warmup_iter,
+            lambda_depth=lambda_depth,
+            depth_model=depth_model,
+            grassmann_relax_start=grassmann_relax_start,
+            grassmann_relax_end=grassmann_relax_end,
+            floater_min_views=floater_min_views,
+            floater_eps=floater_eps,
         )
     elif cmd == "render":
         if not ckpt:

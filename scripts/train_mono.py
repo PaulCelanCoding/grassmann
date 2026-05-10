@@ -242,6 +242,76 @@ def main():
                          "1/Δλ degeneracy in eigh backward at near-degenerate "
                          "in-plane eigvals (~14% of Gaussians by p99 anisotropy). "
                          "1e-5 to 1e-3 are reasonable.")
+    ap.add_argument("--init_points_path", type=Path, default=None,
+                    help="Override the dataset's bundled point cloud with an external "
+                         "(N, 3) .npy file (e.g. from MASt3R / DUSt3R / VGGT). "
+                         "Optionally pair with --init_colors_path (matching shape "
+                         "(N, 3) in [0, 1]) to also override the per-point colors. "
+                         "Times are still derived from the dataset (median observation "
+                         "of the corresponding scene frame, per-point); points without "
+                         "any observability fall back to t=mid of the time range.")
+    ap.add_argument("--init_colors_path", type=Path, default=None,
+                    help="Optional (N, 3) .npy of per-point colors in [0,1]. "
+                         "Only meaningful with --init_points_path. If absent, points "
+                         "default to gray (0.5, 0.5, 0.5).")
+    # --- Wave A probes ---------------------------------------------------
+    ap.add_argument("--color_lr_warmup_iter", type=int, default=0,
+                    help="#5.2: linearly ramp lr_color from 0 to its base "
+                         "value over this many iters. 0 disables.")
+    ap.add_argument("--random_background", action="store_true",
+                    help="#7.2: per-step uniform-random RGB background "
+                         "during training (validation still uses fixed bg).")
+    ap.add_argument("--max_aspect_ratio", type=float, default=0.0,
+                    help="#6.2: hard cap on Σ_3D in-plane aspect ratio "
+                         "λ_max/λ_min via SVD-clip on P_n L_raw. 0 disables. "
+                         "30 is a sane default (penalty alone leaves p99~6.8e7).")
+    ap.add_argument("--aspect_clip_every", type=int, default=100,
+                    help="#6.2: how often to apply the aspect-ratio clip.")
+    ap.add_argument("--sigma_init_knn_k", type=int, default=0,
+                    help="#3.1: per-point σ²_init from k-NN distance in 4D "
+                         "(Δx, sqrt(α)·Δt). 0 disables (single --sigma_init_sq).")
+    ap.add_argument("--sigma_init_alpha_t", type=float, default=0.1,
+                    help="#3.1: temporal weight in 4D distance for k-NN σ_init.")
+    ap.add_argument("--lambda_time_coherence", type=float, default=0.0,
+                    help="#5.3: time-coherence regularizer "
+                         "‖μ_3D(t+dt/2) − μ_3D(t−dt/2)‖² · w_t1 · w_t2 weight.")
+    ap.add_argument("--time_coherence_dt", type=float, default=0.05,
+                    help="#5.3: dt offset (in normalized time units, "
+                         "ds.times in [0,1]) for the coherence pair.")
+    ap.add_argument("--exposure_per_frame", action="store_true",
+                    help="#1.1: per-frame learnable exposure gain + bias.")
+    ap.add_argument("--lambda_exposure_reg", type=float, default=1e-3,
+                    help="#1.1: L2 reg on (log_gain, bias).")
+    ap.add_argument("--lr_exposure", type=float, default=1e-3,
+                    help="#1.1: LR for exposure params.")
+    ap.add_argument("--temporal_split_threshold", type=float, default=0.0,
+                    help="#4.2: Σ_tt threshold for temporal-axis split. "
+                         "Stressed Gaussians with Σ_tt > thr are split along "
+                         "the time axis (μ_t shifted ±N·sqrt(Σ_tt)). 0 disables.")
+    ap.add_argument("--grassmann_relax_start", type=int, default=0,
+                    help="#3.2: iter when lr_n starts ramping from 0 → base. "
+                         "Use with --init_strategy spatial_slice.")
+    ap.add_argument("--grassmann_relax_end", type=int, default=0,
+                    help="#3.2: iter when lr_n reaches base. 0 disables.")
+    ap.add_argument("--mip_filter_sigma_pixel", type=float, default=0.0,
+                    help="#7.1: resolution-aware 3D smoothing filter half-width "
+                         "in pixels. Adds (σ_pixel · depth / focal)² · I to "
+                         "Σ_3D(t_0) per-Gaussian. 0 disables. ~0.3 typical.")
+    ap.add_argument("--refine_poses", action="store_true",
+                    help="#2.1: per-frame so3+t pose refinement starting at "
+                         "--pose_warmup_iter.")
+    ap.add_argument("--lr_pose_rot", type=float, default=1e-5,
+                    help="#2.1: LR for per-frame so3 vector dR.")
+    ap.add_argument("--lr_pose_trans", type=float, default=1e-4,
+                    help="#2.1: LR for per-frame translation dt.")
+    ap.add_argument("--pose_warmup_iter", type=int, default=2000,
+                    help="#2.1: iter at which pose LRs become nonzero.")
+    ap.add_argument("--floater_min_views", type=int, default=0,
+                    help="#8.1: prune if active in <K iters during the DC "
+                         "window. 0 disables. ~5 is reasonable for 200-iter "
+                         "windows.")
+    ap.add_argument("--floater_eps", type=float, default=1e-3,
+                    help="#8.1: 'active' threshold on per-iter grad_norm.")
     ap.add_argument("--sh_degree", type=int, default=0,
                     help="Spherical-harmonics band for per-Gaussian color. 0 keeps the "
                          "legacy constant-RGB path (color_logit). >0 swaps in sh_dc + "
@@ -306,10 +376,37 @@ def main():
         times_for_init.append(float(ds.times[t_idx]))
     times_init = torch.tensor(times_for_init, dtype=torch.float64)
 
+    # External point cloud override (e.g. MASt3R / DUSt3R). Replaces the
+    # dataset-bundled points; observability is unknown for external sources, so
+    # every external point is treated as "observed in all frames" and its
+    # init time defaults to mid of the time range.
+    points_override: Optional[torch.Tensor] = None
+    colors_override: Optional[torch.Tensor] = None
+    if args.init_points_path is not None:
+        import numpy as np
+        pts = np.load(args.init_points_path).astype(np.float32)
+        if pts.ndim != 2 or pts.shape[-1] != 3:
+            raise SystemExit(f"--init_points_path expects (N, 3); got {pts.shape}")
+        points_override = torch.from_numpy(pts).to(dtype=ds.points3D.dtype)
+        print(f"  [init_points_path] loaded {points_override.shape[0]:,} points "
+              f"from {args.init_points_path}")
+        if args.init_colors_path is not None:
+            cols = np.load(args.init_colors_path).astype(np.float32)
+            if cols.shape != pts.shape:
+                raise SystemExit(f"--init_colors_path shape {cols.shape} != points {pts.shape}")
+            colors_override = torch.from_numpy(cols.clip(0, 1)).to(dtype=ds.points3D.dtype)
+
     # Capacity diagnostic: replicate the point cloud K times with small noise.
-    points = ds.points3D
-    times_used = times_init
-    obs_used = ds.observability
+    points = points_override if points_override is not None else ds.points3D
+    if points_override is not None:
+        # External points: time = mid; observability = full (all frames).
+        N_ext = points.shape[0]
+        t_mid = float(ds.times[ds.T // 2])
+        times_used = torch.full((N_ext,), t_mid, dtype=torch.float64)
+        obs_used = [list(range(ds.T))] * N_ext
+    else:
+        times_used = times_init
+        obs_used = ds.observability
     if args.init_points_multiplier > 1:
         K = args.init_points_multiplier
         rng = torch.Generator(); rng.manual_seed(args.seed if args.seed is not None else 0)
@@ -328,13 +425,27 @@ def main():
               f"N={points.shape[0]} (was {ds.N_points}), perturb scale={noise_scale:.4f}")
     print(f"  Initializing {points.shape[0]} Gaussians (strategy={args.init_strategy})...")
 
+    # #3.1: optional k-NN-based per-point σ²_init.
+    sigma_init_arg: float | torch.Tensor = args.sigma_init_sq
+    if args.sigma_init_knn_k > 0:
+        from grassmann.initialization import compute_knn_sigma_init_sq
+        sigma_init_arg = compute_knn_sigma_init_sq(
+            points, times_used,
+            k=args.sigma_init_knn_k,
+            alpha_t=args.sigma_init_alpha_t,
+        )
+        print(f"  [σ_init knn k={args.sigma_init_knn_k} α_t={args.sigma_init_alpha_t}] "
+              f"per-point σ²: median={sigma_init_arg.median().item():.4g}, "
+              f"min={sigma_init_arg.min().item():.4g}, max={sigma_init_arg.max().item():.4g}")
+
     params = init_gaussians_from_points(
         points,
         times_used,
         ds.cameras_per_frame,
         strategy=args.init_strategy,
         observability=obs_used,
-        sigma_init_sq=args.sigma_init_sq,
+        colors=colors_override,
+        sigma_init_sq=sigma_init_arg,
         opacity=0.5,
         sigma_k_pixel=1.0,
         sigma_k_temporal=0.0,
@@ -380,11 +491,15 @@ def main():
             opacity_threshold=args.opacity_prune_threshold,
             scale_min=args.scale_min_prune,
             scale_max=args.scale_max_prune,
+            temporal_split_threshold=args.temporal_split_threshold,
+            floater_min_views=args.floater_min_views,
+            floater_eps=args.floater_eps,
         ),
         use_fast_rasterizer=args.use_fast_rasterizer,
         fast_raster_config=FastRasterConfig(
             sigma_3d_blur=args.sigma_3d_blur,
             sh_degree=args.sh_degree,
+            mip_filter_sigma_pixel=args.mip_filter_sigma_pixel,
         ),
         rasterizer=args.rasterizer,
         surfel_raster_config=SurfelRasterConfig(
@@ -406,6 +521,21 @@ def main():
         lambda_mu_penalty=(
             args.lambda_mu_penalty if args.mu_constraint == "penalty" else 0.0
         ),
+        color_lr_warmup_iter=args.color_lr_warmup_iter,
+        random_background=args.random_background,
+        max_aspect_ratio=args.max_aspect_ratio,
+        aspect_clip_every=args.aspect_clip_every,
+        lambda_time_coherence=args.lambda_time_coherence,
+        time_coherence_dt=args.time_coherence_dt,
+        exposure_per_frame=args.exposure_per_frame,
+        lambda_exposure_reg=args.lambda_exposure_reg,
+        lr_exposure=args.lr_exposure,
+        grassmann_relax_start=args.grassmann_relax_start,
+        grassmann_relax_end=args.grassmann_relax_end,
+        refine_poses=args.refine_poses,
+        lr_pose_rot=args.lr_pose_rot,
+        lr_pose_trans=args.lr_pose_trans,
+        pose_warmup_iter=args.pose_warmup_iter,
     )
     if val_indices_override is not None:
         cfg_kwargs["validation_frames"] = val_indices_override

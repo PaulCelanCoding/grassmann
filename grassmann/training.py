@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional, Union
 
 import torch
-from torch import Tensor
+from torch import Tensor, nn
 
 from .gaussian import compute_derived, condition_on_time
 from .losses import l1_loss, mse_loss, photometric_loss, LPIPSLoss
@@ -69,8 +69,19 @@ class TrainerConfig:
     # position_lr_init = 0.01 schedule over 30k iters. Color/opacity not scheduled
     # (3DGS does the same).
     lr_decay: float = 1.0
+    # #5.2: warmup color LR linearly from 0 -> base over the first
+    # color_lr_warmup_iter iterations. 0 disables (constant from step 1).
+    color_lr_warmup_iter: int = 0
+    # #6.2: hard cap on aspect ratio λ_max/λ_min of Σ_3D in-plane eigenvalues
+    # (equivalently (s_max/s_min)² of P_n L_raw singular values). 0 disables.
+    # Applied every `aspect_clip_every` iters as a no-grad SVD-based projection.
+    max_aspect_ratio: float = 0.0
+    aspect_clip_every: int = 100
     # Background color for rendering
     background: Tensor = field(default_factory=lambda: torch.tensor([0.05, 0.05, 0.1]))
+    # #7.2: at each train_step, replace the constant `background` with a
+    # uniform random RGB sample. Validation/render still uses `background`.
+    random_background: bool = False
     # Validation
     validation_every: int = 0          # 0 = disabled
     validation_cams: Optional[list[int]] = None  # which camera indices to evaluate on
@@ -110,6 +121,29 @@ class TrainerConfig:
     # 0 disables. See results/rca/mu_dof_ab_test.md and the GaussianParams
     # mu_constraint docstring for the full A/B context.
     lambda_mu_penalty: float = 0.0
+    # #5.3 time-coherence regularizer.
+    # Penalize ‖μ_3D(t+dt) − μ_3D(t)‖² · w_t · w_{t+dt} for sampled (t, t+dt).
+    # 0 disables. Uses already-sampled t per step + dt offset (symmetric ±dt/2).
+    lambda_time_coherence: float = 0.0
+    time_coherence_dt: float = 0.05
+    # #1.1 per-frame learnable exposure: rendered ← exp(log_gain[t]) · rendered + bias[t].
+    # Compensates AE/AWB drift in NeRFies/DyCheck. lambda_exposure_reg L2's params.
+    exposure_per_frame: bool = False
+    lambda_exposure_reg: float = 1e-3
+    lr_exposure: float = 1e-3
+    # #3.2 progressive Grassmann relaxation: scale lr_n from 0 → base over
+    # [grassmann_relax_start, grassmann_relax_end]. Use with init_strategy=
+    # spatial_slice (n=e₀ at init) so the geometry settles in the static-3DGS
+    # regime before n is allowed to tilt. 0/0 disables.
+    grassmann_relax_start: int = 0
+    grassmann_relax_end: int = 0
+    # #2.1 pose refinement: per-frame so3 + translation perturbation.
+    # δR via exp(skew(dR)) @ R_orig, δc via c_orig + dt (world frame).
+    # LR is held at 0 until iter `pose_warmup_iter`, then ramped to lr_R / lr_t.
+    refine_poses: bool = False
+    lr_pose_rot: float = 1e-5
+    lr_pose_trans: float = 1e-4
+    pose_warmup_iter: int = 2000
     # Structural-loss kind: 'boxstats' (legacy 7x7 local-mean+var matcher) or
     # 'ssim' (1 - SSIM Gaussian-windowed, matches 3DGS DSSIM term). Only
     # active when lambda_structural > 0.
@@ -206,6 +240,41 @@ class Trainer:
                 print(f"  [warning] LPIPS disabled: {e}")
                 self.lpips_fn = None
 
+        # #2.1 pose-refinement params (per-frame so3 vec + translation).
+        self.pose_dR: Optional[nn.Parameter] = None
+        self.pose_dt: Optional[nn.Parameter] = None
+        if self.config.refine_poses:
+            T = self.T
+            dev = self.model.n_raw.device
+            dt_ = self.model.n_raw.dtype
+            self.pose_dR = nn.Parameter(torch.zeros(T, 3, dtype=dt_, device=dev))
+            self.pose_dt = nn.Parameter(torch.zeros(T, 3, dtype=dt_, device=dev))
+            # LR initially 0 (warmup); ramped in train loop.
+            self.optimizer.add_param_group(
+                {"params": [self.pose_dR], "lr": 0.0, "name": "pose_dR"}
+            )
+            self.optimizer.add_param_group(
+                {"params": [self.pose_dt], "lr": 0.0, "name": "pose_dt"}
+            )
+
+        # #1.1 per-frame exposure (log_gain (T,), bias (T, 3)).
+        self.exposure_log_gain: Optional[nn.Parameter] = None
+        self.exposure_bias: Optional[nn.Parameter] = None
+        if self.config.exposure_per_frame:
+            T = self.T
+            dev = self.model.n_raw.device
+            dt = self.model.n_raw.dtype
+            self.exposure_log_gain = nn.Parameter(torch.zeros(T, dtype=dt, device=dev))
+            self.exposure_bias = nn.Parameter(torch.zeros(T, 3, dtype=dt, device=dev))
+            self.optimizer.add_param_group(
+                {"params": [self.exposure_log_gain],
+                 "lr": self.config.lr_exposure, "name": "exposure_log_gain"}
+            )
+            self.optimizer.add_param_group(
+                {"params": [self.exposure_bias],
+                 "lr": self.config.lr_exposure, "name": "exposure_bias"}
+            )
+
         self.history: dict[str, list] = {"iter": [], "loss": [], "l1": [], "psnr": [], "N": []}
 
     # def get_frame(self, cam_idx: int, t_idx: int) -> Tensor:
@@ -224,9 +293,34 @@ class Trainer:
             frame = self.frame_data(cam_idx, self.times[t_idx])
         return frame.to(device=self.model.n_raw.device)
 
+    def _perturbed_camera(self, cam_idx: int):
+        """#2.1: build a Camera with R_new = exp(skew(dR)) @ R, c_new = c + dt.
+
+        Returns a new dataclass — keeps autograd live through the per-frame
+        pose params. No-op when pose refinement is disabled.
+        """
+        cam = self.cameras[cam_idx]
+        if self.pose_dR is None:
+            return cam
+        dR = self.pose_dR[cam_idx]                                # (3,)
+        dt = self.pose_dt[cam_idx]                                # (3,)
+        # Skew-symmetric matrix from so3 vec.
+        z = torch.zeros_like(dR[0])
+        K = torch.stack([
+            torch.stack([z, -dR[2], dR[1]]),
+            torch.stack([dR[2], z, -dR[0]]),
+            torch.stack([-dR[1], dR[0], z]),
+        ])
+        delta_R = torch.linalg.matrix_exp(K)                      # (3, 3)
+        R_new = delta_R @ cam.R.to(dtype=dR.dtype, device=dR.device)
+        c_new = cam.c.to(dtype=dt.dtype, device=dt.device) + dt
+        from .projection import Camera as _Cam
+        return _Cam(R=R_new, c=c_new, fx=cam.fx, fy=cam.fy, cx=cam.cx, cy=cam.cy)
+
     def render_one(self, cam_idx: int, t_value: float,
                    means2d_capture: Optional[list] = None,
-                   return_aux: bool = False):
+                   return_aux: bool = False,
+                   bg_override: Optional[Tensor] = None):
         """Render the current model from camera cam_idx at time t_value.
 
         When `means2d_capture` is a list, the means2D dummy tensor (which gets
@@ -236,9 +330,13 @@ class Trainer:
         When `return_aux=True` and the surfel rasterizer is active, returns
         (image, aux_dict) — aux contains 'rend_normal', 'rend_dist', etc. (see
         grassmann.surfel_rasterizer.RENDER_PKG_KEYS). Otherwise returns image.
+
+        bg_override: optional (3,) tensor that replaces self.config.background
+        for this call only — used by #7.2 random_background during train_step.
         """
         params = self.model.forward()
-        bg = self.config.background.to(dtype=params.color.dtype, device=params.color.device)
+        bg_src = bg_override if bg_override is not None else self.config.background
+        bg = bg_src.to(dtype=params.color.dtype, device=params.color.device)
 
         if self.config.rasterizer == "surfel":
             if not (surfel_available() and params.n.is_cuda):
@@ -247,7 +345,7 @@ class Trainer:
                 )
             sc = self.config.surfel_raster_config or SurfelRasterConfig()
             out = surfel_rasterize(
-                params, t_value, self.cameras[cam_idx], self.H, self.W,
+                params, t_value, self._perturbed_camera(cam_idx), self.H, self.W,
                 background=bg, config=sc,
                 static_baseline=self.config.static_baseline,
                 means2d_capture=means2d_capture,
@@ -258,7 +356,7 @@ class Trainer:
         if self.config.use_fast_rasterizer and fast_available() and params.n.is_cuda:
             fc = self.config.fast_raster_config or FastRasterConfig()
             img = fast_rasterize(
-                params, t_value, self.cameras[cam_idx], self.H, self.W,
+                params, t_value, self._perturbed_camera(cam_idx), self.H, self.W,
                 background=bg, config=fc,
                 static_baseline=self.config.static_baseline,
                 means2d_capture=means2d_capture,
@@ -269,7 +367,7 @@ class Trainer:
             means2d_capture.append(None)
         derived = compute_derived(params)
         tc = condition_on_time(params, derived, t_value, static=self.config.static_baseline)
-        sg = project_to_screen(params, tc, self.cameras[cam_idx])
+        sg = project_to_screen(params, tc, self._perturbed_camera(cam_idx))
         img = rasterize(sg, H=self.H, W=self.W, background=bg)
         return (img, None) if return_aux else img
 
@@ -299,13 +397,34 @@ class Trainer:
         # depth-distortion / normal-consistency regularization.
         want_aux = (self.config.rasterizer == "surfel"
                     and self.config.use_2dgs_losses)
+        # #7.2 random background during training only.
+        bg_override = None
+        if self.config.random_background:
+            bg_override = torch.rand(3, dtype=self.model.n_raw.dtype,
+                                     device=self.model.n_raw.device)
         if want_aux:
             rendered, aux = self.render_one(cam_idx, t_value,
                                             means2d_capture=means2d_capture,
-                                            return_aux=True)
+                                            return_aux=True,
+                                            bg_override=bg_override)
         else:
-            rendered = self.render_one(cam_idx, t_value, means2d_capture=means2d_capture)
+            rendered = self.render_one(cam_idx, t_value,
+                                       means2d_capture=means2d_capture,
+                                       bg_override=bg_override)
             aux = None
+
+        # #1.1 per-frame exposure: rendered ← exp(g_t)·rendered + b_t.
+        # rendered may be (H, W, 3) (toy/fast paths) or (3, H, W) (surfel path).
+        # Bias is per-channel (3,); broadcast against last or first axis.
+        if self.exposure_log_gain is not None:
+            g = torch.exp(self.exposure_log_gain[t_idx])                   # scalar
+            b = self.exposure_bias[t_idx]                                  # (3,)
+            if rendered.dim() == 3 and rendered.shape[-1] == 3:
+                # (H, W, 3): bias broadcasts naturally on last dim.
+                rendered = (g * rendered + b).clamp(0.0, 1.0)
+            else:
+                # (3, H, W) layout (e.g. surfel aux path).
+                rendered = (g * rendered + b.view(3, 1, 1)).clamp(0.0, 1.0)
 
         # Loss.
         loss = photometric_loss(
@@ -316,6 +435,12 @@ class Trainer:
             lpips_fn=self.lpips_fn,
             lambda_lpips=self.config.lambda_lpips,
         )
+        # #1.1 exposure L2 reg.
+        if (self.exposure_log_gain is not None
+                and self.config.lambda_exposure_reg > 0.0):
+            reg = (self.exposure_log_gain ** 2).mean() + (self.exposure_bias ** 2).mean()
+            loss = loss + self.config.lambda_exposure_reg * reg
+
         # Phase-A-correctness penalties.
         if self.config.lambda_frob > 0.0:
             # Mean-squared L_raw entries; targets the soft-rank-collapse pathology
@@ -346,7 +471,7 @@ class Trainer:
                 surf_d = exp_d * (1 - self.config.depth_ratio) + \
                          self.config.depth_ratio * med_d         # (1, H, W)
                 # rend_normal in allmap is view-space; rotate to world via R^T.
-                cam = self.cameras[cam_idx]
+                cam = self._perturbed_camera(cam_idx)
                 R_w = cam.R.to(device=aux["rend_normal"].device,
                                dtype=aux["rend_normal"].dtype)
                 rend_n_view = aux["rend_normal"].permute(1, 2, 0)  # (H, W, 3)
@@ -354,13 +479,17 @@ class Trainer:
                 surf_n_world = depth_to_world_normal(surf_d, cam).permute(2, 0, 1)
                 surf_n_world = surf_n_world * rend_alpha.detach()
                 loss = loss + l_norm * normal_consistency_loss(rend_n_world, surf_n_world)
+        # Aniso / time-coherence both need a fresh forward+derived; share one.
+        _need_derived = (self.config.lambda_aniso > 0.0
+                         or self.config.lambda_time_coherence > 0.0)
+        if _need_derived:
+            from .gaussian import compute_derived, condition_on_time
+            params_now = self.model.forward()
+            d = compute_derived(params_now)
         if self.config.lambda_aniso > 0.0:
             # Bounded anisotropy penalty on Σ_3D(t_0). We recompute Σ_3D_t inside
             # the model's forward graph by re-doing the projector + Schur — this
             # is differentiable and adds modest cost (3x3 eigvalsh per Gaussian).
-            from .gaussian import compute_derived, condition_on_time
-            params_now = self.model.forward()
-            d = compute_derived(params_now)
             tc = condition_on_time(params_now, d, t_0=t_value)
             eigs = torch.linalg.eigvalsh(tc.Sigma_3D_t)             # (N, 3) ascending
             lam_max = eigs[..., 2]
@@ -368,6 +497,16 @@ class Trainer:
             eps = 1e-8
             aniso_normed = ((lam_max - lam_min) / (lam_max + lam_min + eps)) ** 2
             loss = loss + self.config.lambda_aniso * aniso_normed.mean()
+        if self.config.lambda_time_coherence > 0.0:
+            # #5.3: ‖V_3D(t+dt/2) − V_3D(t-dt/2)‖² · w_t1 · w_t2.
+            # Symmetric step keeps gradient roughly centered around t_value.
+            dt = float(self.config.time_coherence_dt)
+            tc1 = condition_on_time(params_now, d, t_0=t_value - 0.5 * dt)
+            tc2 = condition_on_time(params_now, d, t_0=t_value + 0.5 * dt)
+            diff = (tc2.V_3D_t - tc1.V_3D_t)                          # (N, 3)
+            w = (tc1.w_t * tc2.w_t).detach()                          # (N,) gate, no grad
+            tc_loss = (w * (diff * diff).sum(-1)).mean()
+            loss = loss + self.config.lambda_time_coherence * tc_loss
         with torch.no_grad():
             l1_val = l1_loss(rendered, target).item()
             mse_val = mse_loss(rendered, target).item()
@@ -450,6 +589,14 @@ class Trainer:
         running_l1 = 0.0
         running_psnr = 0.0
         decay = self.config.lr_decay
+        warmup_color = self.config.color_lr_warmup_iter
+        # Snapshot color-group base LR(s) once. Covers both sh_degree==0
+        # ("color") and sh_degree>0 ("sh_dc", "sh_rest").
+        _color_group_names = ("color", "sh_dc", "sh_rest")
+        base_lr_color: dict[str, float] = {
+            g["name"]: g["lr"] for g in self.optimizer.param_groups
+            if g["name"] in _color_group_names
+        }
         for i in range(1, n + 1):
             # Log-linear LR schedule on geometric params (mirrors 3DGS).
             if decay < 1.0:
@@ -459,6 +606,43 @@ class Trainer:
                     name = group["name"]
                     if name in self._base_lrs:
                         group["lr"] = self._base_lrs[name] * scale
+            # #5.2 color-LR warmup: linear 0 -> base over `warmup_color` iters.
+            # Applies to whichever color group(s) the optimizer has.
+            if warmup_color > 0 and base_lr_color:
+                ramp = min(i / warmup_color, 1.0)
+                for group in self.optimizer.param_groups:
+                    if group["name"] in base_lr_color:
+                        group["lr"] = base_lr_color[group["name"]] * ramp
+            # #2.1 pose-refinement warmup: hold pose LRs at 0 until
+            # pose_warmup_iter, then snap to (lr_R, lr_t).
+            if self.pose_dR is not None:
+                p_w = self.config.pose_warmup_iter
+                tgt_R = self.config.lr_pose_rot if i >= p_w else 0.0
+                tgt_t = self.config.lr_pose_trans if i >= p_w else 0.0
+                for group in self.optimizer.param_groups:
+                    if group["name"] == "pose_dR":
+                        group["lr"] = tgt_R
+                    elif group["name"] == "pose_dt":
+                        group["lr"] = tgt_t
+            # #3.2 progressive Grassmann relaxation: scale lr_n 0 → base
+            # over [start, end]. Idle if both 0.
+            r_start = self.config.grassmann_relax_start
+            r_end = self.config.grassmann_relax_end
+            if r_end > 0 and r_end > r_start and "n" in self._base_lrs:
+                if i < r_start:
+                    n_scale = 0.0
+                elif i >= r_end:
+                    n_scale = 1.0
+                else:
+                    n_scale = (i - r_start) / max(r_end - r_start, 1)
+                # Compose with decay schedule already applied above.
+                base_n = self._base_lrs["n"]
+                if decay < 1.0:
+                    t = min(i / max(n, 1), 1.0)
+                    base_n = base_n * (decay ** t)
+                for group in self.optimizer.param_groups:
+                    if group["name"] == "n":
+                        group["lr"] = base_n * n_scale
 
             loss_val, l1_val, psnr_val = self.train_step(iter_num=i)
             running_loss += loss_val
@@ -467,6 +651,22 @@ class Trainer:
 
             if i % self.config.renormalize_every == 0:
                 self.renormalize_manifolds()
+
+            # #6.2 hard aspect-ratio clip on Σ_3D in-plane eigenvalues.
+            if (self.config.max_aspect_ratio > 0
+                    and i % self.config.aspect_clip_every == 0):
+                clipped = self.model.clip_aspect_ratio_(self.config.max_aspect_ratio)
+                if clipped > 0:
+                    # Wipe Adam momentum on L_raw to avoid stale-direction kicks
+                    # right after the projection.
+                    for group in self.optimizer.param_groups:
+                        if group["name"] == "L_raw":
+                            for p in group["params"]:
+                                state = self.optimizer.state.get(p, {})
+                                if "exp_avg" in state:
+                                    state["exp_avg"].zero_()
+                                if "exp_avg_sq" in state:
+                                    state["exp_avg_sq"].zero_()
 
             # Periodic opacity reset (Phase-A-correctness: addresses 32%-dead pathology).
             if (self.config.opacity_reset_every > 0
@@ -495,6 +695,7 @@ class Trainer:
                     self.config.density_config,
                 )
                 print(f"  [density @ iter {i:5d}] split={stats['split']:4d} "
+                      f"tsplit={stats.get('tsplit', 0):3d} "
                       f"pruned={stats['pruned']:4d} N={stats['final_N']}")
 
             if i % le == 0:

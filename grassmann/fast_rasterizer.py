@@ -185,6 +185,11 @@ class FastRasterConfig:
     # in meter-ish coordinates. Larger values become a meaningful blur, not just
     # a numerical fix.
     sigma_3d_blur: float = 1e-4
+    # #7.1 Mip-Splatting-style resolution-aware 3D filter.
+    # When > 0, adds (mip_filter_sigma_pixel * depth / focal)^2 · I to Σ_3D(t_0)
+    # per-Gaussian, principled honest replacement for the fixed sigma_3d_blur.
+    # Recommended ~0.3 (anti-alias kernel half-width = 0.3 px in screen space).
+    mip_filter_sigma_pixel: float = 0.0
 
 
 def fast_rasterize(
@@ -284,6 +289,19 @@ def fast_rasterize(
     if config.sigma_3d_blur > 0.0:
         eye = torch.eye(3, dtype=sigma_3d_t.dtype, device=sigma_3d_t.device)
         sigma_3d_t = sigma_3d_t + (config.sigma_3d_blur ** 2) * eye
+    if config.mip_filter_sigma_pixel > 0.0:
+        # #7.1: per-Gaussian 3D smoothing filter scaled by depth/focal so its
+        # screen-space footprint is `mip_filter_sigma_pixel` pixels.
+        # depth = z component of (R · (V_3D_t - c)) in camera coords.
+        with torch.no_grad():
+            R_dev = cam_dev.R                                       # (3, 3)
+            c_dev = cam_dev.c                                       # (3,)
+        cam_pts = (tc.V_3D_t - c_dev) @ R_dev.T                     # (N, 3)
+        depth = cam_pts[..., 2].clamp_min(1e-3)                     # (N,)
+        focal = 0.5 * (float(cam_dev.fx) + float(cam_dev.fy))
+        sigma_per = (config.mip_filter_sigma_pixel * depth) / focal  # (N,)
+        eye = torch.eye(3, dtype=sigma_3d_t.dtype, device=sigma_3d_t.device)
+        sigma_3d_t = sigma_3d_t + (sigma_per ** 2).view(-1, 1, 1) * eye
     cov3D_precomp = sigma3d_to_cov6(sigma_3d_t)                  # (N, 6)
 
     # Either feed precomputed RGB (sh_degree == 0 path) or per-Gaussian SH

@@ -178,6 +178,36 @@ class TrainableGaussians(nn.Module):
             eps = 1e-8
             self.n_raw.data /= self.n_raw.data.norm(dim=-1, keepdim=True).clamp_min(eps)
 
+    @torch.no_grad()
+    def clip_aspect_ratio_(self, max_ratio: float) -> int:
+        """#6.2: cap aspect ratio of in-plane covariance λ_max/λ_min ≤ max_ratio.
+
+        Operates on the projected factor P_n L_raw (4×3). Singular values
+        s = (s_1 ≥ s_2 ≥ s_3) of P_n L_raw correspond to eigenvalues λ_i = s_i²
+        of the 4D covariance. Floor s_min so (s_max/s_min)² ≤ max_ratio, then
+        rebuild L_raw = P_n L_raw_clipped + n (n^T L_raw)_orig (n-component is
+        in the optimizer null direction; preserved unchanged).
+
+        Returns the number of Gaussians that were actually clipped.
+        """
+        eps = 1e-8
+        n_unit = self.n_raw / self.n_raw.norm(dim=-1, keepdim=True).clamp_min(eps)
+        # n^T L_raw : (N, 3); n-direction component of L_raw to add back.
+        nT_L = (n_unit.unsqueeze(-2) @ self.L_raw).squeeze(-2)             # (N, 3)
+        n_comp = n_unit.unsqueeze(-1) * nT_L.unsqueeze(-2)                 # (N, 4, 3)
+        PnL = self.L_raw - n_comp                                          # (N, 4, 3)
+        # Batched SVD: PnL = U S V^T with U: (N, 4, 3), S: (N, 3), V^T: (N, 3, 3).
+        U, S, Vh = torch.linalg.svd(PnL, full_matrices=False)
+        s_max = S.max(dim=-1, keepdim=True).values                         # (N, 1)
+        s_floor = s_max / float(max_ratio) ** 0.5
+        S_new = torch.maximum(S, s_floor)
+        clipped = (S_new > S).any(dim=-1).sum().item()
+        if clipped == 0:
+            return 0
+        PnL_new = U @ torch.diag_embed(S_new) @ Vh
+        self.L_raw.data.copy_(PnL_new + n_comp)
+        return int(clipped)
+
 
 def trainable_from_params(
     params: GaussianParams,

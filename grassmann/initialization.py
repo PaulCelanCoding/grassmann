@@ -115,6 +115,36 @@ def init_gaussian_from_point(
     )
 
 
+def compute_knn_sigma_init_sq(
+    points: Tensor,                                # (N, 3)
+    times: Tensor,                                 # (N,)
+    *,
+    k: int = 3,
+    alpha_t: float = 0.0,
+    eps: float = 1e-6,
+) -> Tensor:
+    """#3.1: per-point σ²_init from k-NN distance in 4D.
+
+    Returns a (N,) tensor where σ²_init[i] = mean of the k smallest 4D squared
+    distances from point i to other points (in [Δx, sqrt(alpha_t)·Δt] space).
+    The standard 3DGS heuristic uses k=3 and floors the result.
+
+    For N <= k+1, falls back to a global default of 0.02 to avoid degenerate
+    cases on tiny clouds.
+    """
+    N = points.shape[0]
+    if N <= k + 1:
+        return torch.full((N,), 0.02, dtype=points.dtype, device=points.device)
+    # Build (N, 4) feature in [x, y, z, sqrt(alpha_t)*t] units.
+    feat = torch.cat([points, (alpha_t ** 0.5) * times.to(points.dtype).unsqueeze(-1)], dim=-1)
+    # Pairwise squared distances. For N up to ~1e5 this fits in L4 memory.
+    d2 = torch.cdist(feat, feat, p=2.0).pow(2)                              # (N, N)
+    d2.fill_diagonal_(float("inf"))
+    knn = d2.topk(k, dim=-1, largest=False).values                          # (N, k)
+    sigma_sq = knn.mean(dim=-1).clamp_min(eps)                              # (N,)
+    return sigma_sq
+
+
 def init_gaussians_from_points(
     points: Tensor,                                # (N, 3)
     times: Tensor,                                 # (N,)
@@ -123,7 +153,7 @@ def init_gaussians_from_points(
     colors: Optional[Tensor] = None,               # (N, 3)
     strategy: InitStrategy = "random",
     observability: Optional[list[list[int]]] = None,
-    sigma_init_sq: float = 0.02,
+    sigma_init_sq: float | Tensor = 0.02,
     opacity: float = 0.5,
     sigma_k_pixel: float = 1.0,
     sigma_k_temporal: float = 0.0,
@@ -150,7 +180,17 @@ def init_gaussians_from_points(
         generator = torch.Generator()
         generator.manual_seed(int(seed))
 
-    sigma_L = (sigma_init_sq / 3.0) ** 0.5
+    # σ_init_sq may be a scalar (legacy) or per-point Tensor (#3.1 k-NN).
+    if isinstance(sigma_init_sq, Tensor):
+        if sigma_init_sq.shape != (N,):
+            raise ValueError(
+                f"per-point sigma_init_sq must have shape ({N},); got {tuple(sigma_init_sq.shape)}"
+            )
+        sigma_L_per = (sigma_init_sq.to(dtype=DTYPE) / 3.0).clamp_min(1e-12).sqrt()  # (N,)
+    else:
+        sigma_L_per = torch.full((N,), float(sigma_init_sq), dtype=DTYPE)
+        sigma_L_per = (sigma_L_per / 3.0).sqrt()
+    sigma_L = (float(sigma_init_sq) / 3.0) ** 0.5 if not isinstance(sigma_init_sq, Tensor) else None
     if strategy == "spatial_slice":
         # v7-doc default §7.2: n = e_0 for every Gaussian. The plane E_n is
         # the spatial slice {x_0 = 0}; the Gaussian is rank-3 (a static-3DGS
@@ -163,7 +203,9 @@ def init_gaussians_from_points(
     else:
         n_all = torch.randn(N, 4, dtype=DTYPE, generator=generator)
         n_all = n_all / n_all.norm(dim=-1, keepdim=True).clamp_min(1e-12)    # (N, 4)
-    L_raw_all = torch.randn(N, 4, 3, dtype=DTYPE, generator=generator) * sigma_L  # (N, 4, 3)
+    # Per-point σ_L scaling: L_raw[i] ~ N(0, σ_L_per[i]² I).
+    L_raw_all = torch.randn(N, 4, 3, dtype=DTYPE, generator=generator)
+    L_raw_all = L_raw_all * sigma_L_per.view(N, 1, 1)                       # (N, 4, 3)
     mu_all = torch.cat(
         [times.to(dtype=DTYPE).unsqueeze(-1), points.to(dtype=DTYPE)],
         dim=-1,
