@@ -135,6 +135,7 @@ def train(
     diag_single_frame: int,
     lambda_frob: float,
     opacity_reset_every: int,
+    opacity_reset_logit: float,
     lambda_aniso: float,
     densify_every: int,
     densify_start: int,
@@ -143,6 +144,7 @@ def train(
     spatial_split_threshold: float,
     max_split_per_event: int,
     opacity_prune_threshold: float,
+    scale_min_prune: float,
     sh_degree: int,
     lr_decay: float,
     lr_pos_scale: float,
@@ -188,6 +190,12 @@ def train(
     floater_eps: float,
     sh_degree_warmup_step: int,
     lambda_opacity_entropy: float,
+    density_strategy: str,
+    mcmc_noise_lr: float,
+    mcmc_noise_after: int,
+    mcmc_noise_gate_k: float,
+    mcmc_noise_gate_thr: float,
+    mcmc_max_relocations_per_step: int,
 ) -> None:
     scene_dir = _ensure_scene_unpacked(scene)
     suffix = f"-{run_tag}" if run_tag else ""
@@ -223,6 +231,8 @@ def train(
         argv += ["--lambda_frob", str(lambda_frob)]
     if opacity_reset_every > 0:
         argv += ["--opacity_reset_every", str(opacity_reset_every)]
+    if opacity_reset_logit != -5.0:
+        argv += ["--opacity_reset_logit", str(opacity_reset_logit)]
     if lambda_aniso > 0.0:
         argv += ["--lambda_aniso", str(lambda_aniso)]
     if densify_every > 0:
@@ -232,6 +242,8 @@ def train(
                  "--grad_threshold", str(grad_threshold),
                  "--spatial_split_threshold", str(spatial_split_threshold),
                  "--opacity_prune_threshold", str(opacity_prune_threshold)]
+        if scale_min_prune != 1e-6:
+            argv += ["--scale_min_prune", str(scale_min_prune)]
         if max_split_per_event > 0:
             argv += ["--max_split_per_event", str(max_split_per_event)]
     if sh_degree > 0:
@@ -310,6 +322,15 @@ def train(
         argv += ["--sh_degree_warmup_step", str(sh_degree_warmup_step)]
     if lambda_opacity_entropy > 0:
         argv += ["--lambda_opacity_entropy", str(lambda_opacity_entropy)]
+    if density_strategy != "heuristic":
+        argv += ["--density_strategy", density_strategy]
+    if mcmc_noise_lr > 0:
+        argv += ["--mcmc_noise_lr", str(mcmc_noise_lr),
+                 "--mcmc_noise_after", str(mcmc_noise_after),
+                 "--mcmc_noise_gate_k", str(mcmc_noise_gate_k),
+                 "--mcmc_noise_gate_thr", str(mcmc_noise_gate_thr)]
+    if mcmc_max_relocations_per_step > 0:
+        argv += ["--mcmc_max_relocations_per_step", str(mcmc_max_relocations_per_step)]
     _run(argv)
     ckpt_vol.commit()
 
@@ -383,6 +404,7 @@ def main(
     diag_single_frame: int = -1,
     lambda_frob: float = 0.0,
     opacity_reset_every: int = 0,
+    opacity_reset_logit: float = -5.0,
     lambda_aniso: float = 0.0,
     densify_every: int = 0,
     densify_start: int = 500,
@@ -391,6 +413,7 @@ def main(
     spatial_split_threshold: float = 0.5,
     max_split_per_event: int = 0,
     opacity_prune_threshold: float = 1e-3,
+    scale_min_prune: float = 1e-6,
     sh_degree: int = 0,
     lr_decay: float = 1.0,
     lr_pos_scale: float = 1.0,
@@ -436,6 +459,12 @@ def main(
     floater_eps: float = 1e-3,
     sh_degree_warmup_step: int = 0,
     lambda_opacity_entropy: float = 0.0,
+    density_strategy: str = "heuristic",
+    mcmc_noise_lr: float = 0.0,
+    mcmc_noise_after: int = 0,
+    mcmc_noise_gate_k: float = 100.0,
+    mcmc_noise_gate_thr: float = 0.005,
+    mcmc_max_relocations_per_step: int = 0,
 ):
     """
     --cmd smoke:  short run (--iters used; default 500) at scale 4. Validates
@@ -463,6 +492,7 @@ def main(
             diag_single_frame=diag_single_frame,
             lambda_frob=lambda_frob,
             opacity_reset_every=opacity_reset_every,
+            opacity_reset_logit=opacity_reset_logit,
             lambda_aniso=lambda_aniso,
             densify_every=densify_every,
             densify_start=densify_start,
@@ -471,6 +501,7 @@ def main(
             spatial_split_threshold=spatial_split_threshold,
             max_split_per_event=max_split_per_event,
             opacity_prune_threshold=opacity_prune_threshold,
+            scale_min_prune=scale_min_prune,
             sh_degree=sh_degree,
             lr_decay=lr_decay,
             lr_pos_scale=lr_pos_scale,
@@ -515,6 +546,12 @@ def main(
             floater_eps=floater_eps,
             sh_degree_warmup_step=sh_degree_warmup_step,
             lambda_opacity_entropy=lambda_opacity_entropy,
+            density_strategy=density_strategy,
+            mcmc_noise_lr=mcmc_noise_lr,
+            mcmc_noise_after=mcmc_noise_after,
+            mcmc_noise_gate_k=mcmc_noise_gate_k,
+            mcmc_noise_gate_thr=mcmc_noise_gate_thr,
+            mcmc_max_relocations_per_step=mcmc_max_relocations_per_step,
         )
     elif cmd == "train":
         train.remote(
@@ -535,6 +572,7 @@ def main(
             diag_single_frame=diag_single_frame,
             lambda_frob=lambda_frob,
             opacity_reset_every=opacity_reset_every,
+            opacity_reset_logit=opacity_reset_logit,
             lambda_aniso=lambda_aniso,
             densify_every=densify_every,
             densify_start=densify_start,
@@ -543,6 +581,7 @@ def main(
             spatial_split_threshold=spatial_split_threshold,
             max_split_per_event=max_split_per_event,
             opacity_prune_threshold=opacity_prune_threshold,
+            scale_min_prune=scale_min_prune,
             sh_degree=sh_degree,
             lr_decay=lr_decay,
             lr_pos_scale=lr_pos_scale,
@@ -587,6 +626,12 @@ def main(
             floater_eps=floater_eps,
             sh_degree_warmup_step=sh_degree_warmup_step,
             lambda_opacity_entropy=lambda_opacity_entropy,
+            density_strategy=density_strategy,
+            mcmc_noise_lr=mcmc_noise_lr,
+            mcmc_noise_after=mcmc_noise_after,
+            mcmc_noise_gate_k=mcmc_noise_gate_k,
+            mcmc_noise_gate_thr=mcmc_noise_gate_thr,
+            mcmc_max_relocations_per_step=mcmc_max_relocations_per_step,
         )
     elif cmd == "render":
         if not ckpt:

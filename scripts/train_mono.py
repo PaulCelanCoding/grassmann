@@ -240,7 +240,7 @@ def main():
     ap.add_argument("--surfel_eigh_jitter", type=float, default=0.0,
                     help="Anisotropic random jitter on Σ_3D before eigh. Breaks "
                          "1/Δλ degeneracy in eigh backward at near-degenerate "
-                         "in-plane eigvals (~14% of Gaussians by p99 anisotropy). "
+                         "in-plane eigvals (~14%% of Gaussians by p99 anisotropy). "
                          "1e-5 to 1e-3 are reasonable.")
     ap.add_argument("--init_points_path", type=Path, default=None,
                     help="Override the dataset's bundled point cloud with an external "
@@ -317,6 +317,31 @@ def main():
                          "(capped at --sh_degree). 0 disables.")
     ap.add_argument("--lambda_opacity_entropy", type=float, default=0.0,
                     help="#6.3: opacity-entropy reg weight. Pushes α to {0, 1}.")
+    # #4.1 3DGS-MCMC (Kheradmand NeurIPS 2024) -- relocate dead Gaussians to
+    # live ones with opacity/scale correction; SGLD noise on μ_spatial.
+    ap.add_argument("--density_strategy", choices=("heuristic", "mcmc", "hybrid"),
+                    default="heuristic",
+                    help="#4.1: 'heuristic' (default) = legacy split+temporal_split"
+                         "+prune. 'mcmc' = relocate dead → live by Eq. 8 of"
+                         " Kheradmand 2024 with correction"
+                         " o←1-(1-o)^(1/(k+1)), L←L/√(k+1) (NO growth)."
+                         " 'hybrid' = split+temporal_split for growth, then"
+                         " mcmc_relocate replaces low-opacity prune.")
+    ap.add_argument("--mcmc_noise_lr", type=float, default=0.0,
+                    help="#4.1: SGLD noise scale on μ_spatial (per step). "
+                         "Effective std = mcmc_noise_lr * |L|_F * gate(opacity). "
+                         "0 disables. 5e-5 is a sane starting value.")
+    ap.add_argument("--mcmc_noise_after", type=int, default=0,
+                    help="#4.1: iter when SGLD noise activates.")
+    ap.add_argument("--mcmc_noise_gate_k", type=float, default=100.0,
+                    help="#4.1: opacity gate sharpness. Higher = noise restricted "
+                         "to nearly-dead Gaussians only.")
+    ap.add_argument("--mcmc_noise_gate_thr", type=float, default=0.005,
+                    help="#4.1: opacity gate threshold. Default 0.005 matches "
+                         "the standard 3DGS prune cutoff.")
+    ap.add_argument("--mcmc_max_relocations_per_step", type=int, default=0,
+                    help="#4.1: cap on dead Gaussians relocated per cycle. "
+                         "0 = unlimited (relocate all dead).")
     ap.add_argument("--sh_degree", type=int, default=0,
                     help="Spherical-harmonics band for per-Gaussian color. 0 keeps the "
                          "legacy constant-RGB path (color_logit). >0 swaps in sh_dc + "
@@ -499,6 +524,12 @@ def main():
             temporal_split_threshold=args.temporal_split_threshold,
             floater_min_views=args.floater_min_views,
             floater_eps=args.floater_eps,
+            density_strategy=args.density_strategy,
+            mcmc_noise_lr=args.mcmc_noise_lr,
+            mcmc_noise_after=args.mcmc_noise_after,
+            mcmc_noise_gate_k=args.mcmc_noise_gate_k,
+            mcmc_noise_gate_thr=args.mcmc_noise_gate_thr,
+            mcmc_max_relocations_per_step=args.mcmc_max_relocations_per_step,
         ),
         use_fast_rasterizer=args.use_fast_rasterizer,
         fast_raster_config=FastRasterConfig(

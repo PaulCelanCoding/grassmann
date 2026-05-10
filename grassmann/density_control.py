@@ -93,6 +93,29 @@ class DensityConfig:
     floater_min_views: int = 0
     floater_eps: float = 1e-3
 
+    # ---- #4.1 3DGS-MCMC (Kheradmand NeurIPS 2024) ----------------------------
+    # When density_strategy == "mcmc" the densify_and_prune() pass replaces
+    # heuristic split+prune with stochastic relocation: dead (low-opacity)
+    # Gaussians are sampled to live ones, and opacity / L_raw are corrected
+    # so total scene alpha is preserved (Eq. 8 of the paper). SGLD-style
+    # noise on μ is then applied per training step (mcmc_noise_step) to
+    # encourage exploration. "heuristic" (default) keeps the legacy path.
+    density_strategy: str = "heuristic"      # "heuristic" | "mcmc" | "hybrid"
+    # SGLD noise scale on μ_spatial (per training step). 0 disables.
+    # Effective std = mcmc_noise_lr * |L_raw|_F * sigmoid(-k*(o - τ))  where
+    # the sigmoid gate suppresses noise on alive Gaussians (τ = mcmc_noise_gate_thr).
+    mcmc_noise_lr: float = 0.0
+    mcmc_noise_after: int = 0                # iter at which noise activates
+    mcmc_noise_gate_k: float = 100.0
+    mcmc_noise_gate_thr: float = 0.005
+    # MCMC relocation cadence — how often the densify_and_prune() pass is
+    # called from the trainer is governed by trainer.densify_every. Within
+    # each call, mcmc strategy uses these:
+    mcmc_max_relocations_per_step: int = 0   # 0 = unlimited (all dead are relocated)
+    # When density_strategy == "mcmc", optional pure-growth via duplication
+    # of high-opacity Gaussians (independent of dead-replacement). 0 disables.
+    mcmc_grow_per_step: int = 0
+
 
 class DensityTracker:
     """Tracks per-Gaussian screen-space gradient stats and runs split + prune.
@@ -249,6 +272,20 @@ class DensityTracker:
             collapsed_mask = lam_min < config.scale_min
             runaway_mask = lam_max > config.scale_max
             drop_mask = low_op_mask | collapsed_mask | runaway_mask
+            # RCA diagnostic: opacity distribution (cheap, ~1 ms per call).
+            qs = torch.quantile(
+                opacity,
+                torch.tensor([0.01, 0.05, 0.50, 0.95, 0.99],
+                             device=opacity.device, dtype=opacity.dtype),
+            )
+            n_low = int(low_op_mask.sum().item())
+            n_col = int(collapsed_mask.sum().item())
+            n_run = int(runaway_mask.sum().item())
+            print(
+                f"  opacity q1/q5/q50/q95/q99 = "
+                f"{qs[0]:.4f}/{qs[1]:.4f}/{qs[2]:.4f}/{qs[3]:.4f}/{qs[4]:.4f} "
+                f"| low_op={n_low} collapsed={n_col} runaway={n_run}"
+            )
             # #8.1 floater multi-view consensus pruning.
             if config.floater_min_views > 0:
                 # Only prune Gaussians that have actually been seen this window
@@ -258,7 +295,20 @@ class DensityTracker:
                 floaters = seen & (self.active_counts < config.floater_min_views)
                 drop_mask = drop_mask | floaters
             keep_mask = ~drop_mask
+            n_kept = int(keep_mask.sum().item())
             n_pruned = int(drop_mask.sum().item())
+            # Safety: never prune to N=0 (rasterizer breaks at empty set).
+            # Keep at least the top-1024 by opacity if mass-prune triggered.
+            min_keep = 1024
+            if n_kept < min_keep and n_pruned > 0:
+                k = min(min_keep, opacity.numel())
+                topk = torch.topk(opacity, k).indices
+                save_mask = torch.zeros_like(drop_mask)
+                save_mask[topk] = True
+                drop_mask = drop_mask & ~save_mask
+                keep_mask = ~drop_mask
+                n_pruned = int(drop_mask.sum().item())
+                print(f"  [prune-safety] mass-prune averted; kept top-{k} by opacity")
         if n_pruned > 0:
             self._keep_rows(keep_mask)
         return n_pruned
@@ -392,8 +442,182 @@ class DensityTracker:
         self._keep_rows(keep_mask)
         return n_split
 
+    # --- #4.1 MCMC: Adam-state row-zero and relocation --------------------
+
+    def _zero_optimizer_state_rows(self, param: nn.Parameter, idx: Tensor) -> None:
+        """Zero exp_avg / exp_avg_sq at given row indices for `param`. No-op when
+        no optimizer or no state for that param. `idx` is a 1D LongTensor.
+        """
+        opt = self.optimizer
+        if opt is None or idx.numel() == 0:
+            return
+        state = opt.state.get(param, None)
+        if state is None:
+            return
+        for key in ("exp_avg", "exp_avg_sq"):
+            t = state.get(key, None)
+            if t is None or t.shape[0] != param.shape[0]:
+                continue
+            t.index_fill_(0, idx, 0.0)
+
+    def mcmc_relocate(self, config: DensityConfig) -> dict:
+        """3DGS-MCMC relocation step (Kheradmand NeurIPS 2024).
+
+        Dead (low-opacity) Gaussians are reassigned to destinations sampled
+        from the live population with categorical(opacity[live]). Opacity
+        and L_raw of the destination AND of the relocated copies are
+        corrected so that the destination's total contribution under
+        alpha-blending is preserved:
+
+            o_new   = 1 − (1 − o_old)^(1/(k+1))
+            L_new   = L_old / sqrt(k+1)
+
+        where k+1 = (1 destination + k newcomers landing on it).
+
+        The relocated dead rows inherit n_raw, μ, color/SH from the
+        destination; their Adam state is reset to zero. Live rows that
+        received copies have only their opacity_logit and L_raw modified;
+        their Adam state on those tensors is also zeroed (the abrupt
+        scale change makes prior momentum stale).
+
+        Returns: {"relocated": k, "final_N": N (unchanged)}.
+        """
+        with torch.no_grad():
+            opacity = torch.sigmoid(self.model.opacity_logit)            # (N,)
+            dead_mask = opacity < config.opacity_threshold
+            n_dead = int(dead_mask.sum().item())
+            if n_dead == 0:
+                return {"relocated": 0, "final_N": self.model.N}
+            live_mask = ~dead_mask
+            n_live = int(live_mask.sum().item())
+            if n_live == 0:
+                return {"relocated": 0, "final_N": self.model.N}
+
+            cap = config.mcmc_max_relocations_per_step
+            if cap > 0 and n_dead > cap:
+                # Pick the lowest-opacity dead ones to relocate first.
+                dead_idx_all = torch.nonzero(dead_mask, as_tuple=True)[0]
+                dead_op = opacity[dead_idx_all]
+                topk_local = torch.topk(-dead_op, cap).indices
+                dead_idx = dead_idx_all[topk_local]
+                n_dead = cap
+            else:
+                dead_idx = torch.nonzero(dead_mask, as_tuple=True)[0]
+
+            live_idx = torch.nonzero(live_mask, as_tuple=True)[0]
+            live_op = opacity[live_idx].to(torch.float32)                # multinomial wants fp32+
+
+            # Sample destinations. 0-prob safety: clamp_min so multinomial doesn't NaN.
+            probs = live_op.clamp_min(1e-12)
+            dest_local = torch.multinomial(probs, n_dead, replacement=True)  # (n_dead,)
+            # Count copies per destination (by live position).
+            n_copies = torch.bincount(dest_local, minlength=n_live)          # (n_live,)
+            kp1 = (n_copies + 1).to(self.model.opacity_logit.dtype)          # (n_live,)
+            sqrt_kp1 = kp1.sqrt()                                            # (n_live,)
+
+            # --- Step A: correct live destinations in-place ---
+            # opacity_new = 1 − (1 − opacity)^(1/kp1); only those with k>0 change,
+            # but applying to all is a no-op when kp1=1 → leave them.
+            live_op_new = 1.0 - (1.0 - live_op.to(opacity.dtype)) ** (1.0 / kp1)
+            live_op_new = live_op_new.clamp(1e-6, 1.0 - 1e-6)
+            live_logit_new = torch.log(live_op_new / (1.0 - live_op_new))
+            self.model.opacity_logit.data[live_idx] = live_logit_new
+
+            self.model.L_raw.data[live_idx] = (
+                self.model.L_raw.data[live_idx] / sqrt_kp1.view(-1, 1, 1)
+            )
+
+            # Zero Adam state on the LIVE rows that actually changed (k > 0).
+            changed_live_local = torch.nonzero(n_copies > 0, as_tuple=True)[0]
+            changed_live_global = live_idx[changed_live_local]
+            self._zero_optimizer_state_rows(self.model.opacity_logit, changed_live_global)
+            self._zero_optimizer_state_rows(self.model.L_raw, changed_live_global)
+
+            # --- Step B: overwrite dead rows with corrected destinations ---
+            dest_global = live_idx[dest_local]                               # (n_dead,)
+            self.model.n_raw.data[dead_idx] = self.model.n_raw.data[dest_global]
+            self.model.L_raw.data[dead_idx] = self.model.L_raw.data[dest_global]
+            self.model.mu.data[dead_idx] = self.model.mu.data[dest_global]
+            self.model.opacity_logit.data[dead_idx] = self.model.opacity_logit.data[dest_global]
+            if self.model.sh_degree == 0:
+                self.model.color_logit.data[dead_idx] = self.model.color_logit.data[dest_global]
+            else:
+                self.model.sh_dc.data[dead_idx] = self.model.sh_dc.data[dest_global]
+                self.model.sh_rest.data[dead_idx] = self.model.sh_rest.data[dest_global]
+
+            # Zero Adam state on dead rows for ALL per-Gaussian params (clean restart).
+            for name in _per_gaussian_param_names(self.model):
+                self._zero_optimizer_state_rows(getattr(self.model, name), dead_idx)
+
+        return {"relocated": int(n_dead), "final_N": self.model.N}
+
+    def mcmc_noise_step(self, config: DensityConfig, iter_num: int = 0) -> None:
+        """Per-iter SGLD-like noise on μ_spatial, gated by opacity.
+
+        std = mcmc_noise_lr * |L_raw|_F  (per-Gaussian scale)
+        gate = sigmoid(-k * (opacity - τ))   ≈ 1 if dead, ≈ 0 if alive.
+
+        Only μ_spatial (last 3 components of μ) is perturbed — μ_time is
+        kept static so the temporal-axis split stays meaningful. n_raw and
+        L_raw are not perturbed (matches Kheradmand Eq. 9, which adds noise
+        only on means).
+        """
+        if config.mcmc_noise_lr <= 0.0 or iter_num < config.mcmc_noise_after:
+            return
+        with torch.no_grad():
+            opacity = torch.sigmoid(self.model.opacity_logit)            # (N,)
+            gate = torch.sigmoid(
+                -config.mcmc_noise_gate_k * (opacity - config.mcmc_noise_gate_thr)
+            )                                                            # (N,)
+            # Per-Gaussian scale proxy: Frobenius norm of L_raw.
+            L = self.model.L_raw.data
+            scale = L.flatten(1).norm(dim=-1).clamp_min(1e-8)            # (N,)
+            std = config.mcmc_noise_lr * scale * gate                    # (N,)
+            if self.model.mu_lr_split:
+                noise = torch.randn_like(self.model.mu_spatial.data)     # (N, 3)
+                self.model.mu_spatial.data.add_(noise * std.unsqueeze(-1))
+            else:
+                noise = torch.randn(
+                    self.model.mu.shape[0], 3,
+                    dtype=self.model.mu.dtype, device=self.model.mu.device,
+                )                                                        # (N, 3)
+                # μ layout: [t, x, y, z] → perturb indices 1:.
+                self.model.mu.data[..., 1:].add_(noise * std.unsqueeze(-1))
+
+    # ----------------------------------------------------------------------
+
     def densify_and_prune(self, config: DensityConfig) -> dict:
-        """Apply split + prune in one pass. Returns stats dict."""
+        """Apply the configured density-control pass. Returns stats dict.
+
+        density_strategy:
+          - "heuristic" (default): split + temporal_split + prune (legacy).
+          - "mcmc": stochastic relocation per Kheradmand 2024 (no growth).
+          - "hybrid": heuristic split + temporal_split, then mcmc_relocate
+                     replaces low-opacity prune (dead → live with correction).
+                     The collapsed/runaway prune still runs to drop pathological
+                     Gaussians the relocator can't fix.
+        """
+        if config.density_strategy == "mcmc":
+            stats = self.mcmc_relocate(config)
+            self.reset()
+            stats.setdefault("split", 0)
+            stats.setdefault("tsplit", 0)
+            stats.setdefault("pruned", 0)
+            return stats
+        if config.density_strategy == "hybrid":
+            n_split = self.split(config)
+            n_tsplit = self.temporal_split(config)
+            relo = self.mcmc_relocate(config)             # dead → live
+            # After relocation, every former-dead row inherits opacity from a
+            # live destination, so prune.opacity_threshold no longer matches
+            # them. The remaining prune call therefore only catches
+            # collapsed/runaway Σ_3D pathologies.
+            n_pruned = self.prune(config)
+            self.reset()
+            return {"split": n_split, "tsplit": n_tsplit,
+                    "pruned": n_pruned,
+                    "relocated": relo.get("relocated", 0),
+                    "final_N": self.model.N}
         n_split = self.split(config)
         n_tsplit = self.temporal_split(config)
         n_pruned = self.prune(config)
