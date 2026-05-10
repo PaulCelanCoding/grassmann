@@ -239,6 +239,37 @@ A1 anchor at 413s was a cold start; warm-start probes finish in 220-330s. Runawa
 | 6 | Combo-C | aspect + rbg + warmup (no grelax) | +0.21 | 53253 | 352 |
 | ⊥ | Combo-D | A + warmup + floater | −0.10 | 12481 | 213 |
 
+## Wave A.4 — Combo-AA stacks + final retunes
+
+After Combo-AA's +0.86 dB, tested whether adding any other knob still helps.
+
+| probe | flag(s) | val PSNR | Δ vs A1 | Δ vs Combo-AA | N | wall |
+|---|---|---|---|---|---|---|
+| **Combo-AA (baseline)** | — | 24.36 | +0.86 | — | 48033 | 283 |
+| Combo-AA + #6.3 entropy | `--lambda_opacity_entropy 0.01` | 24.24 | +0.74 | **−0.12** | 50494 | 316 |
+| Combo-AA + #6.1 SH-warmup | `--sh_degree_warmup_step 1000` | 24.22 | +0.72 | **−0.14** | 48681 | 306 |
+| Combo-AA + #5.3 time-coherence | `--lambda_time_coherence 0.1` | 24.10 | +0.60 | **−0.26** | 45729 | 325 |
+| Combo-AA + relax_end=12000 | (longer relax window) | 24.09 | +0.59 | **−0.27** | 49506 | 309 |
+| #2.1 v5 (lr=5e-4/5e-3, warmup 100) | aggressive pose-ref | 23.61 | +0.11 | — | 22591 | 281 |
+| #1.1 v5 (λ_reg=10) | near-suppressed exposure | 23.52 | +0.02 | — | 22163 | 248 |
+| #3.1 v4 (k=10) | more k-NN neighbors | 23.43 | −0.07 | — | 22378 | 245 |
+
+### Wave A.4 findings
+
+- **Combo-AA is a local optimum.** Every stack we tested *degrades* the combo. The −0.27 dB worst case (relax 12k) suggests the recipe is finely balanced.
+- **#2.1 pose refinement scales with LR.** v1 (1e-5/1e-4) → +0.03, v4 (1e-4/1e-3) → +0.05, v5 (5e-4/5e-3) → +0.11. There IS pose signal, just not enough to compete on slice-banana. Larger LRs likely explode posed.
+- **#1.1 exposure with λ=10 (near-suppression) recovers to baseline.** Confirms the per-frame exposure params are actively *hurting* — not just useless. The path overfits.
+- **#3.1 k-NN σ regression is robust.** k=3, k=5, k=10, α_t=0, α_t=0.1 — all variants regress 0.07–0.10 dB. Single σ_init=0.02 is calibrated for slice-banana.
+
+## Saturation analysis
+
+The current ceiling on slice-banana with **knob-tuning alone** appears to be Combo-AA at val=24.36, Δ +0.86 vs A1. Beyond this:
+- The historical anchor (b958b68 era) was val=24.41, so we've **closed 95% of the unexplained 0.91 dB anchor drift** already.
+- The D3DGS reference at val=27.50 (apples scale-8) is still ~1.5 dB away (assuming the s4→s8 mapping holds). Closing this requires *qualitatively different* leverage:
+  1. **#9.1 DepthAnythingV2 prior** — standard sparse-view fix, often 0.5–1.5 dB on monocular. Highest-EV unexplored.
+  2. **#4.1 3DGS-MCMC relocation** — directly attacks dead-rate + split-direction ambiguity in G(3,4).
+  3. **#5.1 Riemannian Adam** — XL effort; lower ROI now since #3.2 grelax already captured part of this hypothesis.
+
 ## Recipe — recommended new default
 
 ```bash
