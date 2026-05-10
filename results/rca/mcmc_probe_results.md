@@ -231,16 +231,24 @@ iterations, while the top 5% recover above 0.7 in the same window. The
 
 ### Why collapsed-prune doesn't catch zombies
 
-The current `scale_min=1e-6` is far too tight. Zombies have median
-λ_min ≈ 3e-4 — three orders of magnitude above 1e-6. They are not
-"collapsed" by the current criterion, but they *are* functionally
-invisible at typical pixel scales (a disk with λ_max ≈ 5e-3 sq-units
-projects to << 1 pixel in this scene).
+The prune code uses `lam_min_nonzero = eigs[:, 1]` (the **middle**
+eigenvalue — i.e. the smaller disk axis), not `eigs[:, 0]` (the rank-2
+kernel direction, ≈ 0 by construction). Correctly applied, the
+zombie/alive separation is:
 
-A `scale_min ≈ 5e-4` (q50 of zombie λ_min) would catch ~half the
-zombies; `scale_min ≈ 5e-3` (zombie λ_max q50) would catch all of them
-plus some borderline alive Gaussians. The boundary is not crisp, but
-the zombie peak is unambiguous in the histogram.
+| population | λ_kernel q50 | λ_mid q50 (used for prune) | λ_max q50 |
+|---|---|---|---|
+| ALIVE | 0.0180 | 0.0673 | 0.344 |
+| ZOMBIE | 0.00032 | 0.00535 | 0.0054 |
+
+Zombie λ_mid q1=0.0012, q5=0.0019, q50=0.0054, q95=0.147. Alive λ_mid
+q1=0.0104, q5=0.0156. There's a clean gap: setting `scale_min ≈ 5e-3`
+catches **47% of zombies** (9,673 of 20,504) and only **0.01% of alive
+Gaussians as collateral** (3 of 21,255). `scale_min ≈ 1e-2` catches
+62% of zombies; the trade-off is more alive collateral.
+
+The current `scale_min=1e-6` is **3 orders of magnitude tighter than
+needed**.
 
 ## Final disposition
 
@@ -265,13 +273,34 @@ Phase C numbers. It hasn't been visible until now because both the
 default and Combo-AA recipes had `opacity_reset_every=0`, which
 bypassed the question entirely (no resets, no zombie/alive separation).
 
+### Wave 6 — zombie fix verification (run this session)
+
+| probe | val PSNR | Δ vs Combo-AA | N | wall (s) | prunes total |
+|---|---|---|---|---|---|
+| Combo-AA baseline | 24.36 | — | 48.0k | 283 | 0 |
+| P-rca-1 (+opacity-reset 3000) | 24.49 | +0.13 | 60.0k | 316 | 7 |
+| P-rca-6 (+opacity-reset + scale_min 5e-4) | 24.53 | +0.17 | 57.5k | 314 | 1 |
+| **P-rca-7 (+opacity-reset + scale_min 5e-3)** | **24.50** | **+0.14** | **45.1k** | **287** | **11,937** |
+
+- P-rca-6 with `scale_min=5e-4` caught only 1 Gaussian — too tight.
+  Zombie λ_mid q1 ≈ 1.2e-3, q50 ≈ 5e-3, so 5e-4 is below the entire
+  zombie distribution.
+- P-rca-7 with `scale_min=5e-3` caught **11,937** zombies across 48
+  density events (peak 893/cycle pre-reset, 880 post-reset). 47% of
+  the zombie population per the checkpoint analysis.
+- **PSNR is unchanged (24.50 vs 24.49)**. Zombies are **inert
+  capacity** — they don't hurt val PSNR, just waste memory/compute.
+- N drops 25% (60k → 45k) and wall drops to 287s (matched to Combo-AA's
+  283s baseline) — so opacity-reset + zombie-prune is a **free
+  performance optimization**: same +0.14 dB quality, same wall as
+  vanilla Combo-AA, with 6% fewer Gaussians than Combo-AA itself.
+
 ### Recommended next probes (not run in this session)
 
-1. **Tighten scale_min** to 5e-4 or 1e-3 in heuristic Combo-AA →
-   directly target zombies. Expected effect: prune count → thousands
-   per cycle, N final → smaller, val PSNR ?? (could improve if
-   capacity is reallocated to alive regions, or worse if the opt
-   loses momentum).
+1. **Lower split_shrink_factor** from 1.6 to 1.2 → fewer zombies
+   generated upstream. Could improve PSNR if some zombies are
+   "almost-alive" (with less aggressive shrinking, they'd stay alive
+   and contribute).
 2. **Lower split_shrink_factor** from 1.6 to 1.2 → less aggressive
    per-split shrinking → fewer zombies generated. Expected: smoother
    N curve, fewer cascades.
