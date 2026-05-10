@@ -153,21 +153,50 @@ From the user's original 30-idea list, the following are still unexplored:
 
 All three only surfaced on Modal; local CPU smoke tests would catch them.
 
-## Implementation summary
+## Wave A.2 — retunes + Combo-A variants
 
-All flags landed on branch `monocular-init` (uncommitted at the time of probe launch). Code touched:
+After Wave A produced Combo-A (+0.76), 10 retunes targeted the unexpectedly-failed singles + Combo-A hyperparam sweep.
 
-- `grassmann/training.py` — TrainerConfig fields; LR warmup/relax schedules; pose+exposure params + optimizer groups; `_perturbed_camera()`; `clip_aspect_ratio_()` invocation; time-coherence loss term.
-- `grassmann/trainable.py` — `clip_aspect_ratio_()` method on `TrainableGaussians`.
-- `grassmann/initialization.py` — `compute_knn_sigma_init_sq()` + per-point σ²_init plumbing.
-- `grassmann/density_control.py` — `temporal_split()` method; floater multi-view pruning in `prune()`.
-- `grassmann/fast_rasterizer.py` — `mip_filter_sigma_pixel` field + per-Gaussian σ²·I addition.
-- `scripts/train_mono.py` — CLI flags for all 11 items.
-- `scripts/train_modal.py` — Modal-side parameter pass-through.
+| probe | flag(s) | val PSNR | Δ vs A1 | N | wall | verdict |
+|---|---|---|---|---|---|---|
+| **#4.2 v3 (thr 0.1)** | `--temporal_split_threshold 0.1` | **23.96** | **+0.46** | 53846 | 301 | **NEW SINGLE-FLAG WINNER** (was +0.29 with 19× N at thr 0.01) |
+| #4.2 v4 (thr 0.1 + cap 100) | + max_split_per_event=100 | 23.97 | +0.47 | 55296 | 310 | cap didn't matter (thr 0.1 already selective) |
+| **Combo-A v2 (relax 8k)** | `--grassmann_relax_end 8000` | **24.30** | **+0.80** | 51579 | 298 | **NEW BEST COMBO** (vs v1 +0.76) |
+| Combo-A v3 (relax 3k) | start=500, end=3000 | 24.25 | +0.75 | 53418 | 299 | sweet spot is 5–8k |
+| Combo-A v4 (aspect 10) | `--max_aspect_ratio 10` | 24.16 | +0.66 | 42476 | 285 | tighter aspect regresses |
+| Combo-A v5 (aspect 100) | `--max_aspect_ratio 100` | 24.13 | +0.63 | 47624 | 300 | looser aspect regresses |
+| #2.1 v4 retune | lr_R=1e-4, lr_t=1e-3, warmup=500 | 23.55 | +0.05 | 23425 | 241 | still null — NeRFies poses are fine |
+| #1.1 v4 retune | λ_reg=0.1 (100× stronger) | 23.10 | −0.40 | 21347 | 314 | still regressed (was −0.80) |
+| #3.1 v3 retune | α_t=0 (pure spatial k-NN) | 23.42 | −0.08 | 21841 | 222 | still regressed (was −0.10) |
+| #7.1 v3 retune | mip σ=1.0 | 23.52 | +0.02 | 22896 | 235 | null at all σ tested |
 
-## Bugs encountered (and fixed) during launch
+### Wave A.2 findings
 
-1. **`lr_R` / `lr_t` Modal CLI lowercasing** — Modal converts `--lr-R` to `lr_r` (kwarg), but Python signature had `lr_R` (uppercase). Renamed to `lr_pose_rot` / `lr_pose_trans`.
-2. **`_perturbed_camera` recursion** — `replace_all` swap of `self.cameras[cam_idx]` → `self._perturbed_camera(cam_idx)` hit the helper itself. Fixed.
+- **#4.2 threshold matters massively**: 0.01 → 0.1 fixes runaway N (435k → 54k) AND gives **+0.46 dB** instead of +0.29. The cap (`max_split_per_event=100`) does nothing once threshold is selective. **#4.2 thr=0.1 is now a clear single-flag winner.**
+- **Combo-A v2 (relax_end=8000) is the new best combo at +0.80 dB.** Longer relax window lets `n` settle more gradually. relax=3000 costs 0.05 dB; >8000 not tested.
+- **aspect_ratio=30 is the sweet spot.** 10 (too tight) and 100 (too loose) both regress to ~+0.65.
+- **#2.1 pose-refinement remains null** even with bigger LRs and earlier warmup. NeRFies poses on slice-banana are not the bottleneck.
+- **#1.1 exposure remains regressed** even with 100× stronger reg (recovered from −0.80 to −0.40 but still worse than A1).
+- **#3.1 k-NN σ remains regressed** at α_t=0. Single σ_init is already calibrated for slice-banana.
+- **#7.1 mip-filter remains null** at σ=0.3 and σ=1.0.
 
-Both bugs only surfaced on Modal; local tests would catch them in a re-run.
+### Performance (capacity + wall) — gains pay capacity costs
+
+| probe | Δ dB | N (vs 22910) | wall (s) |
+|---|---|---|---|
+| **Combo-A v2** | **+0.80** | 2.25× | 298 |
+| **#4.2 v3 thr=0.1** | **+0.46** | 2.35× | 301 |
+| #6.2 single | +0.26 | 2.23× | 328 |
+| #3.2 grelax | +0.35 | 1.08× | 238 |
+| #4.2 v1 thr=0.01 | +0.29 | **19.0×** | **1342** |
+| Combo-D (regression) | −0.10 | 0.54× | 213 |
+
+A1 anchor at 413s was a cold start; warm-start probes finish in 220-330s. Runaway #4.2 v1 (1342s) is the only true outlier. **At fixed iters, the big winners (Combo-A v2, #4.2 thr=0.1) all pay ~2.2-2.3× capacity (50k Gaussians).**
+
+## Wave A.3 — stacking #4.2 thr=0.1 onto Combo-A
+
+Pending probes:
+- **Combo-AA** = Combo-A v2 + #4.2 thr=0.1 → if additive: +1.26 dB
+- **Combo-AB** = Combo-A v1 + #4.2 thr=0.1 → comparison
+- **#6.1 SH-degree warmup** (sh_degree_warmup_step=1000) — single-flag
+- **#6.3 opacity-entropy reg** (λ=0.01) — single-flag
