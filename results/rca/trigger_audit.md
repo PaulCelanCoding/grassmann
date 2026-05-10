@@ -133,16 +133,61 @@ temporal splitting helps PSNR.
 | Combo-AA + opacity-reset + threshold 0.005 | 45,048 | 651 | **3,966** | 1500/cycle post-reset |
 | Combo-AA + opacity-reset + scale_min 5e-3 | 42,480 | 687 | **11,937** | the zombie fix; ~250/cycle steady |
 
-## Disposition
+## Disposition (verified by probes)
 
-- **Bug A** (`scale_max=100`): trivial config fix, but runaway has
-  never been observed → likely safe to lower without effect on
-  current runs. Useful for catching numerical drift in longer runs.
-- **Bug C** (μ_t OOB): **the highest-EV next probe**. Adds a new
-  prune trigger that's orthogonal to scale-based death.
-- **Bug D** (λ_aniso redundant): ergonomic cleanup, no quality lever.
-- **Bug E** (tsplit too tight): small lever; worth ~30 sec of grep
-  on the existing checkpoint to estimate effect before launching.
+All 4 candidate fixes probed on top of P-rca-7 (val=24.50 dB, N=45.1k,
+wall=287s). Results:
+
+| Bug | Fix probed | val PSNR | Δ vs P-rca-7 | N | wall | verdict |
+|---|---|---|---|---|---|---|
+| A | `scale_max_prune=2.0` (was 100) | **24.08** | **−0.42** | 39.7k | 271s | **HURTS** — prunes useful large disks; original 100 was correctly dormant |
+| C | `mu_t ∈ [-0.05, 1.05]` prune | 24.50 | +0.00 | 44.8k | 275s | **NULL** — only 1% of pop is OOB |
+| **D** | **`lambda_aniso=0`** (was 1e-3) | **24.62** | **+0.12** | 46.8k | **210s** | **WIN +0.12 dB AND −27% wall** |
+| E | `temporal_split_threshold=0.03` (was 0.1) | 24.53 | +0.03 | 57.3k | 307s | marginal: +0.03 dB, +N, +wall |
+
+### Counter-finding: Bug A — dormant ≠ should-fire
+
+`scale_max=100` was correctly dormant. Tightening to 2.0 prunes the top
+~10% of Gaussians by λ_max — exactly the large disks that cover lots of
+pixels. Result: −0.42 dB val PSNR, ~14% smaller N (the actually-useful
+big Gaussians are gone). **Lesson:** a dormant trigger can be dormant
+because the pathology it catches doesn't occur in healthy training. The
+audit method should distinguish "dormant ∧ pathology present" (e.g.
+zombies/scale_min) from "dormant ∧ pathology absent" (runaway/scale_max).
+
+### Headline finding: Bug D — redundant `lambda_aniso` was net-negative
+
+The Wave A `--max-aspect-ratio 30` flag adds a hard SVD aspect-clip every
+100 iterations that bounds the disk aspect to ≤ 30. The
+`lambda_aniso=1e-3` regularizer, originally added in Phase A to suppress
+runaway anisotropy, was made redundant by the SVD clip but stayed in the
+recipe. Empirical effect of removing it:
+
+- **val PSNR: +0.12 dB** (24.50 → 24.62). Likely from removing
+  gradient noise contributed by the eigh-backward pathology near
+  near-degenerate disk eigenvalues (this is the same pathology
+  documented in `results/rca/surfel_rasterizer_ab.md`).
+- **wallclock: −27%** (287 → 210s). The regularizer requires:
+    - Extra `compute_derived(params)` forward pass per iter
+    - Extra `condition_on_time` call per iter
+    - **Per-Gaussian 3×3 `torch.linalg.eigvalsh(Sigma_3D_t)`** per iter
+      (60k eigvalsh ops/step at peak)
+    - The unstable eigh backward chain
+- **N: ~unchanged** (46.8k vs 45.1k).
+
+**New candidate baseline:** Combo-AA + opacity-reset 3000 + scale_min 5e-3
++ lambda_aniso 0 → **val=24.62 dB, N=46.8k, wall=210s**. That's
+**+0.26 dB and −26% wall vs Combo-AA's 24.36 / 283s**.
+
+### Bug E — small marginal effect
+
+`temporal_split_threshold=0.03` (was 0.1) makes temporal splits fire on
+Σ_tt > 0.03 instead of > 0.1 — catches more Gaussians (Σ_tt q97 ≈ 0.03).
+Net: +0.03 dB (within noise), +27% N (57k vs 45k), +7% wall. Not worth
+adopting; the small PSNR gain doesn't justify the N/wall growth.
+
+### Reusability
 
 The audit script (`scripts/audit_triggers.py`) is reusable: drop a
-new checkpoint into it for any future RCA round.
+new checkpoint into it for any future RCA round. The new baseline
+recipe is in `scripts/launch_bug_probes.sh` (Bug D variant).
