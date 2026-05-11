@@ -70,9 +70,11 @@ class TrainableGaussians(nn.Module):
         clamp_mode: str = "hard",
         eps_schur: float = 1e-20,
         use_quadratic_motion: bool = False,
+        use_s3_motion: bool = False,
     ):
         super().__init__()
         self.use_quadratic_motion = bool(use_quadratic_motion)
+        self.use_s3_motion = bool(use_s3_motion)
         self.sh_degree = int(sh_degree)
         self.mu_constraint = str(mu_constraint)
         if self.mu_constraint not in ("free", "project", "reparam", "penalty"):
@@ -126,6 +128,12 @@ class TrainableGaussians(nn.Module):
         else:
             self.c2 = None  # type: ignore[assignment]
 
+        if self.use_s3_motion:
+            omega_init = torch.zeros(params.mu.shape[0], 3, dtype=dtype, device=device)
+            self.omega = nn.Parameter(omega_init)
+        else:
+            self.omega = None  # type: ignore[assignment]
+
     @property
     def N(self) -> int:
         return self.n_raw.shape[0]
@@ -178,6 +186,7 @@ class TrainableGaussians(nn.Module):
             clamp_mode=self.clamp_mode,
             eps_schur=self.eps_schur,
             c2=self.c2 if self.use_quadratic_motion else None,
+            omega=self.omega if self.use_s3_motion else None,
         )
 
     def renormalize_manifold_(self) -> None:
@@ -230,6 +239,7 @@ def trainable_from_params(
     clamp_mode: str = "hard",
     eps_schur: float = 1e-20,
     use_quadratic_motion: bool = False,
+    use_s3_motion: bool = False,
 ) -> TrainableGaussians:
     """Convenience constructor."""
     return TrainableGaussians(
@@ -241,6 +251,7 @@ def trainable_from_params(
         clamp_mode=clamp_mode,
         eps_schur=eps_schur,
         use_quadratic_motion=use_quadratic_motion,
+        use_s3_motion=use_s3_motion,
     )
 
 
@@ -260,6 +271,7 @@ def build_optimizer(
     lr_mu_spatial: float = 1e-4,
     lr_mu_time: float = 1e-3,
     lr_c2: float = 5e-4,
+    lr_omega: float = 5e-4,
 ) -> torch.optim.Optimizer:
     """Adam with separate learning rates per parameter type, following the
     standard 3DGS setup. n is a unit-vector manifold parameter (smaller lr),
@@ -305,6 +317,10 @@ def build_optimizer(
     if getattr(model, "use_quadratic_motion", False) and model.c2 is not None:
         param_groups.append(
             {"params": [model.c2], "lr": lr_c2, "name": "c2"}
+        )
+    if getattr(model, "use_s3_motion", False) and model.omega is not None:
+        param_groups.append(
+            {"params": [model.omega], "lr": lr_omega, "name": "omega"}
         )
 
     return torch.optim.Adam(param_groups)

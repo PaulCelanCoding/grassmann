@@ -19,11 +19,46 @@ re-normalize manifolds.
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional, Union
 
 import torch
 from torch import Tensor, nn
+
+
+class _PhaseTimer:
+    """CUDA-synced wall-time accumulator for a named phase.
+
+    Used only when TrainerConfig.profile_breakdown=True; otherwise __enter__
+    and __exit__ are no-ops so the production path pays zero overhead.
+    """
+    __slots__ = ("trainer", "key", "active", "_t0")
+
+    def __init__(self, trainer, key: str, active: bool):
+        self.trainer = trainer
+        self.key = key
+        self.active = active
+
+    def __enter__(self):
+        if self.active:
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            self._t0 = time.perf_counter()
+        return self
+
+    def __exit__(self, *exc):
+        if not self.active:
+            return
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        dt = time.perf_counter() - self._t0
+        self.trainer._phase_times[self.key] = (
+            self.trainer._phase_times.get(self.key, 0.0) + dt
+        )
+        self.trainer._phase_counts[self.key] = (
+            self.trainer._phase_counts.get(self.key, 0) + 1
+        )
 
 from .gaussian import compute_derived, condition_on_time
 from .losses import l1_loss, mse_loss, photometric_loss, LPIPSLoss
@@ -64,6 +99,7 @@ class TrainerConfig:
     lr_mu_spatial: float = 1e-4
     lr_mu_time: float = 1e-3
     lr_c2: float = 5e-4
+    lr_omega: float = 5e-4
     # Log-linear LR decay applied to geometric params (n, mu, L_raw) only.
     # 1.0 disables; <1 decays geometric LRs from base*1 to base*lr_decay over
     # num_iters via lr(t) = base * lr_decay**t. Mirrors 3DGS's position_lr_final/
@@ -169,6 +205,12 @@ class TrainerConfig:
     normal_after: int = 7000
     dist_after: int = 3000
     depth_ratio: float = 0.0  # 0 = expected depth (mip-NeRF-like), 1 = median (DTU)
+    # Profiling: when True, train_step + train() bracket each phase with
+    # CUDA-synced perf_counter() and dump per-phase ms/iter at log_every.
+    # First profile_warmup_iters iters are discarded (JIT, allocator warmup).
+    # Off by default; bit-identical to non-profile runs when off.
+    profile_breakdown: bool = False
+    profile_warmup_iters: int = 200
 
 
 FrameData = Union[Tensor, Callable[[int, float], Tensor]]
@@ -217,6 +259,7 @@ class Trainer:
             lr_mu_spatial=self.config.lr_mu_spatial,
             lr_mu_time=self.config.lr_mu_time,
             lr_c2=self.config.lr_c2,
+            lr_omega=self.config.lr_omega,
         )
         self.optimizer = self._build_opt(model)
         # Migration: density tracker may rebuild the optimizer mid-training.
@@ -286,6 +329,13 @@ class Trainer:
         # #6.1 SH-degree warmup state.
         self.current_iter: int = 0
         self.history: dict[str, list] = {"iter": [], "loss": [], "l1": [], "psnr": [], "N": []}
+        # Profiling state (used only when config.profile_breakdown).
+        self._phase_times: dict[str, float] = {}
+        self._phase_counts: dict[str, int] = {}
+        self._profile_iter_start: int = 0
+
+    def _phase(self, key: str):
+        return _PhaseTimer(self, key, self.config.profile_breakdown)
 
     # def get_frame(self, cam_idx: int, t_idx: int) -> Tensor:
     #     """Get the target frame for camera cam_idx at time index t_idx."""
@@ -395,158 +445,169 @@ class Trainer:
         """
         self.current_iter = iter_num
         # Sample a frame.
-        if self.config.monocular:
-            # Monocular: one camera per frame, sampled together. self.K must equal self.T.
-            train_pool = self.config.train_frames if self.config.train_frames else list(range(self.T))
-            pick = torch.randint(0, len(train_pool), (1,)).item()
-            t_idx = int(train_pool[pick])
-            cam_idx = t_idx
-        else:
-            cam_idx = torch.randint(0, self.K, (1,)).item()
-            t_idx = torch.randint(0, self.T, (1,)).item()
-        t_value = self.times[t_idx]
+        with self._phase("data"):
+            if self.config.monocular:
+                # Monocular: one camera per frame, sampled together. self.K must equal self.T.
+                train_pool = self.config.train_frames if self.config.train_frames else list(range(self.T))
+                pick = torch.randint(0, len(train_pool), (1,)).item()
+                t_idx = int(train_pool[pick])
+                cam_idx = t_idx
+            else:
+                cam_idx = torch.randint(0, self.K, (1,)).item()
+                t_idx = torch.randint(0, self.T, (1,)).item()
+            t_value = self.times[t_idx]
 
-        # Target and rendered. If DC is enabled, capture the means2D dummy
-        # tensor so the tracker can read screen-space gradients post-backward.
-        means2d_capture: Optional[list] = [] if self.density_tracker is not None else None
-        target = self.get_frame(cam_idx, t_idx).to(self.model.n_raw.dtype)
+            # Target. If DC is enabled, capture the means2D dummy
+            # tensor so the tracker can read screen-space gradients post-backward.
+            means2d_capture: Optional[list] = [] if self.density_tracker is not None else None
+            target = self.get_frame(cam_idx, t_idx).to(self.model.n_raw.dtype)
+
         # Surfel + 2DGS losses: pull aux maps from the rasterizer for
         # depth-distortion / normal-consistency regularization.
         want_aux = (self.config.rasterizer == "surfel"
                     and self.config.use_2dgs_losses)
-        # #7.2 random background during training only.
-        bg_override = None
-        if self.config.random_background:
-            bg_override = torch.rand(3, dtype=self.model.n_raw.dtype,
-                                     device=self.model.n_raw.device)
-        if want_aux:
-            rendered, aux = self.render_one(cam_idx, t_value,
-                                            means2d_capture=means2d_capture,
-                                            return_aux=True,
-                                            bg_override=bg_override)
-        else:
-            rendered = self.render_one(cam_idx, t_value,
-                                       means2d_capture=means2d_capture,
-                                       bg_override=bg_override)
-            aux = None
-
-        # #1.1 per-frame exposure: rendered ← exp(g_t)·rendered + b_t.
-        # rendered may be (H, W, 3) (toy/fast paths) or (3, H, W) (surfel path).
-        # Bias is per-channel (3,); broadcast against last or first axis.
-        if self.exposure_log_gain is not None:
-            g = torch.exp(self.exposure_log_gain[t_idx])                   # scalar
-            b = self.exposure_bias[t_idx]                                  # (3,)
-            if rendered.dim() == 3 and rendered.shape[-1] == 3:
-                # (H, W, 3): bias broadcasts naturally on last dim.
-                rendered = (g * rendered + b).clamp(0.0, 1.0)
+        with self._phase("forward_render"):
+            # #7.2 random background during training only.
+            bg_override = None
+            if self.config.random_background:
+                bg_override = torch.rand(3, dtype=self.model.n_raw.dtype,
+                                         device=self.model.n_raw.device)
+            if want_aux:
+                rendered, aux = self.render_one(cam_idx, t_value,
+                                                means2d_capture=means2d_capture,
+                                                return_aux=True,
+                                                bg_override=bg_override)
             else:
-                # (3, H, W) layout (e.g. surfel aux path).
-                rendered = (g * rendered + b.view(3, 1, 1)).clamp(0.0, 1.0)
+                rendered = self.render_one(cam_idx, t_value,
+                                           means2d_capture=means2d_capture,
+                                           bg_override=bg_override)
+                aux = None
 
-        # Loss.
-        loss = photometric_loss(
-            rendered, target,
-            lambda_l1=self.config.lambda_l1,
-            lambda_structural=self.config.lambda_structural,
-            structural_kind=self.config.structural_kind,
-            lpips_fn=self.lpips_fn,
-            lambda_lpips=self.config.lambda_lpips,
-        )
-        # #1.1 exposure L2 reg.
-        if (self.exposure_log_gain is not None
-                and self.config.lambda_exposure_reg > 0.0):
-            reg = (self.exposure_log_gain ** 2).mean() + (self.exposure_bias ** 2).mean()
-            loss = loss + self.config.lambda_exposure_reg * reg
+        with self._phase("loss"):
+            # #1.1 per-frame exposure: rendered ← exp(g_t)·rendered + b_t.
+            # rendered may be (H, W, 3) (toy/fast paths) or (3, H, W) (surfel path).
+            # Bias is per-channel (3,); broadcast against last or first axis.
+            if self.exposure_log_gain is not None:
+                g = torch.exp(self.exposure_log_gain[t_idx])                   # scalar
+                b = self.exposure_bias[t_idx]                                  # (3,)
+                if rendered.dim() == 3 and rendered.shape[-1] == 3:
+                    # (H, W, 3): bias broadcasts naturally on last dim.
+                    rendered = (g * rendered + b).clamp(0.0, 1.0)
+                else:
+                    # (3, H, W) layout (e.g. surfel aux path).
+                    rendered = (g * rendered + b.view(3, 1, 1)).clamp(0.0, 1.0)
 
-        # Phase-A-correctness penalties.
-        if self.config.lambda_frob > 0.0:
-            # Mean-squared L_raw entries; targets the soft-rank-collapse pathology
-            # where the optimizer routes capacity into the projector's null direction.
-            loss = loss + self.config.lambda_frob * (self.model.L_raw ** 2).mean()
-        if self.config.lambda_mu_penalty > 0.0:
-            # μ-DOF probe: soft penalty <n, μ>² (forward-pass n is unit-normalized).
-            n_unit = self.model.n_raw / self.model.n_raw.norm(dim=-1, keepdim=True).clamp_min(1e-8)
-            if self.model.mu_lr_split:
-                mu_full = torch.cat([self.model.mu_time, self.model.mu_spatial], dim=-1)
-            else:
-                mu_full = self.model.mu
-            n_dot_mu = (n_unit * mu_full).sum(-1)
-            loss = loss + self.config.lambda_mu_penalty * (n_dot_mu ** 2).mean()
-        if aux is not None:
-            # 2DGS regularizers (gated by iter — paper defaults: dist@3000, normal@7000).
-            l_dist = self.config.lambda_dist if iter_num > self.config.dist_after else 0.0
-            l_norm = self.config.lambda_normal if iter_num > self.config.normal_after else 0.0
-            if l_dist > 0.0:
-                loss = loss + l_dist * depth_distortion_loss(aux["rend_dist"])
-            if l_norm > 0.0:
-                rend_alpha = aux["rend_alpha"]                  # (1, H, W)
-                # surf_depth = expected*(1-r) + median*r
-                exp_d = aux["expected_depth"] / rend_alpha.detach().clamp_min(1e-6)
-                exp_d = torch.nan_to_num(exp_d, nan=0.0, posinf=0.0, neginf=0.0)
-                med_d = torch.nan_to_num(aux["median_depth"], nan=0.0,
-                                         posinf=0.0, neginf=0.0)
-                surf_d = exp_d * (1 - self.config.depth_ratio) + \
-                         self.config.depth_ratio * med_d         # (1, H, W)
-                # rend_normal in allmap is view-space; rotate to world via R^T.
-                cam = self._perturbed_camera(cam_idx)
-                R_w = cam.R.to(device=aux["rend_normal"].device,
-                               dtype=aux["rend_normal"].dtype)
-                rend_n_view = aux["rend_normal"].permute(1, 2, 0)  # (H, W, 3)
-                rend_n_world = (rend_n_view @ R_w).permute(2, 0, 1) # (3, H, W)
-                surf_n_world = depth_to_world_normal(surf_d, cam).permute(2, 0, 1)
-                surf_n_world = surf_n_world * rend_alpha.detach()
-                loss = loss + l_norm * normal_consistency_loss(rend_n_world, surf_n_world)
-        # Aniso / time-coherence both need a fresh forward+derived; share one.
-        _need_derived = (self.config.lambda_aniso > 0.0
-                         or self.config.lambda_time_coherence > 0.0)
-        if _need_derived:
-            from .gaussian import compute_derived, condition_on_time
-            params_now = self.model.forward()
-            d = compute_derived(params_now)
-        # #6.3 opacity entropy reg: push α toward {0, 1}.
-        if self.config.lambda_opacity_entropy > 0.0:
-            alpha = torch.sigmoid(self.model.opacity_logit).clamp(1e-6, 1 - 1e-6)
-            ent = -(alpha * torch.log(alpha) + (1 - alpha) * torch.log(1 - alpha))
-            loss = loss + self.config.lambda_opacity_entropy * ent.mean()
+            # Loss.
+            loss = photometric_loss(
+                rendered, target,
+                lambda_l1=self.config.lambda_l1,
+                lambda_structural=self.config.lambda_structural,
+                structural_kind=self.config.structural_kind,
+                lpips_fn=self.lpips_fn,
+                lambda_lpips=self.config.lambda_lpips,
+            )
+            # #1.1 exposure L2 reg.
+            if (self.exposure_log_gain is not None
+                    and self.config.lambda_exposure_reg > 0.0):
+                reg = (self.exposure_log_gain ** 2).mean() + (self.exposure_bias ** 2).mean()
+                loss = loss + self.config.lambda_exposure_reg * reg
 
-        if self.config.lambda_aniso > 0.0:
-            # Bounded anisotropy penalty on Σ_3D(t_0). We recompute Σ_3D_t inside
-            # the model's forward graph by re-doing the projector + Schur — this
-            # is differentiable and adds modest cost (3x3 eigvalsh per Gaussian).
-            tc = condition_on_time(params_now, d, t_0=t_value)
-            eigs = torch.linalg.eigvalsh(tc.Sigma_3D_t)             # (N, 3) ascending
-            lam_max = eigs[..., 2]
-            lam_min = eigs[..., 1]                                  # smallest non-zero
-            eps = 1e-8
-            aniso_normed = ((lam_max - lam_min) / (lam_max + lam_min + eps)) ** 2
-            loss = loss + self.config.lambda_aniso * aniso_normed.mean()
-        if self.config.lambda_time_coherence > 0.0:
-            # #5.3: ‖V_3D(t+dt/2) − V_3D(t-dt/2)‖² · w_t1 · w_t2.
-            # Symmetric step keeps gradient roughly centered around t_value.
-            dt = float(self.config.time_coherence_dt)
-            tc1 = condition_on_time(params_now, d, t_0=t_value - 0.5 * dt)
-            tc2 = condition_on_time(params_now, d, t_0=t_value + 0.5 * dt)
-            diff = (tc2.V_3D_t - tc1.V_3D_t)                          # (N, 3)
-            w = (tc1.w_t * tc2.w_t).detach()                          # (N,) gate, no grad
-            tc_loss = (w * (diff * diff).sum(-1)).mean()
-            loss = loss + self.config.lambda_time_coherence * tc_loss
-        with torch.no_grad():
-            l1_val = l1_loss(rendered, target).item()
-            mse_val = mse_loss(rendered, target).item()
-            psnr_val = 10.0 * float(torch.log10(torch.tensor(max(mse_val, 1e-12)).reciprocal()))
+            # Phase-A-correctness penalties.
+            if self.config.lambda_frob > 0.0:
+                # Mean-squared L_raw entries; targets the soft-rank-collapse pathology
+                # where the optimizer routes capacity into the projector's null direction.
+                loss = loss + self.config.lambda_frob * (self.model.L_raw ** 2).mean()
+            if self.config.lambda_mu_penalty > 0.0:
+                # μ-DOF probe: soft penalty <n, μ>² (forward-pass n is unit-normalized).
+                n_unit = self.model.n_raw / self.model.n_raw.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+                if self.model.mu_lr_split:
+                    mu_full = torch.cat([self.model.mu_time, self.model.mu_spatial], dim=-1)
+                else:
+                    mu_full = self.model.mu
+                n_dot_mu = (n_unit * mu_full).sum(-1)
+                loss = loss + self.config.lambda_mu_penalty * (n_dot_mu ** 2).mean()
+        with self._phase("loss_extra"):
+            if aux is not None:
+                # 2DGS regularizers (gated by iter — paper defaults: dist@3000, normal@7000).
+                l_dist = self.config.lambda_dist if iter_num > self.config.dist_after else 0.0
+                l_norm = self.config.lambda_normal if iter_num > self.config.normal_after else 0.0
+                if l_dist > 0.0:
+                    loss = loss + l_dist * depth_distortion_loss(aux["rend_dist"])
+                if l_norm > 0.0:
+                    rend_alpha = aux["rend_alpha"]                  # (1, H, W)
+                    # surf_depth = expected*(1-r) + median*r
+                    exp_d = aux["expected_depth"] / rend_alpha.detach().clamp_min(1e-6)
+                    exp_d = torch.nan_to_num(exp_d, nan=0.0, posinf=0.0, neginf=0.0)
+                    med_d = torch.nan_to_num(aux["median_depth"], nan=0.0,
+                                             posinf=0.0, neginf=0.0)
+                    surf_d = exp_d * (1 - self.config.depth_ratio) + \
+                             self.config.depth_ratio * med_d         # (1, H, W)
+                    # rend_normal in allmap is view-space; rotate to world via R^T.
+                    cam = self._perturbed_camera(cam_idx)
+                    R_w = cam.R.to(device=aux["rend_normal"].device,
+                                   dtype=aux["rend_normal"].dtype)
+                    rend_n_view = aux["rend_normal"].permute(1, 2, 0)  # (H, W, 3)
+                    rend_n_world = (rend_n_view @ R_w).permute(2, 0, 1) # (3, H, W)
+                    surf_n_world = depth_to_world_normal(surf_d, cam).permute(2, 0, 1)
+                    surf_n_world = surf_n_world * rend_alpha.detach()
+                    loss = loss + l_norm * normal_consistency_loss(rend_n_world, surf_n_world)
+            # Aniso / time-coherence both need a fresh forward+derived; share one.
+            _need_derived = (self.config.lambda_aniso > 0.0
+                             or self.config.lambda_time_coherence > 0.0)
+            if _need_derived:
+                from .gaussian import compute_derived, condition_on_time
+                params_now = self.model.forward()
+                d = compute_derived(params_now)
+            # #6.3 opacity entropy reg: push α toward {0, 1}.
+            if self.config.lambda_opacity_entropy > 0.0:
+                alpha = torch.sigmoid(self.model.opacity_logit).clamp(1e-6, 1 - 1e-6)
+                ent = -(alpha * torch.log(alpha) + (1 - alpha) * torch.log(1 - alpha))
+                loss = loss + self.config.lambda_opacity_entropy * ent.mean()
+
+            if self.config.lambda_aniso > 0.0:
+                # Bounded anisotropy penalty on Σ_3D(t_0). We recompute Σ_3D_t inside
+                # the model's forward graph by re-doing the projector + Schur — this
+                # is differentiable and adds modest cost (3x3 eigvalsh per Gaussian).
+                tc = condition_on_time(params_now, d, t_0=t_value)
+                eigs = torch.linalg.eigvalsh(tc.Sigma_3D_t)             # (N, 3) ascending
+                lam_max = eigs[..., 2]
+                lam_min = eigs[..., 1]                                  # smallest non-zero
+                eps = 1e-8
+                aniso_normed = ((lam_max - lam_min) / (lam_max + lam_min + eps)) ** 2
+                loss = loss + self.config.lambda_aniso * aniso_normed.mean()
+            if self.config.lambda_time_coherence > 0.0:
+                # #5.3: ‖V_3D(t+dt/2) − V_3D(t-dt/2)‖² · w_t1 · w_t2.
+                # Symmetric step keeps gradient roughly centered around t_value.
+                dt = float(self.config.time_coherence_dt)
+                tc1 = condition_on_time(params_now, d, t_0=t_value - 0.5 * dt)
+                tc2 = condition_on_time(params_now, d, t_0=t_value + 0.5 * dt)
+                diff = (tc2.V_3D_t - tc1.V_3D_t)                          # (N, 3)
+                w = (tc1.w_t * tc2.w_t).detach()                          # (N,) gate, no grad
+                tc_loss = (w * (diff * diff).sum(-1)).mean()
+                loss = loss + self.config.lambda_time_coherence * tc_loss
+
+        with self._phase("log_metrics"):
+            with torch.no_grad():
+                l1_val = l1_loss(rendered, target).item()
+                mse_val = mse_loss(rendered, target).item()
+                psnr_val = 10.0 * float(torch.log10(torch.tensor(max(mse_val, 1e-12)).reciprocal()))
 
         # Backprop.
-        self.optimizer.zero_grad()
-        loss.backward()
+        with self._phase("backward"):
+            self.optimizer.zero_grad()
+            loss.backward()
 
         # Density-control gradient accumulation (reads .grad BEFORE optimizer.step()).
-        if self.density_tracker is not None:
-            means2d = means2d_capture[0] if means2d_capture else None
-            self.density_tracker.accumulate(means2d)
+        with self._phase("accum"):
+            if self.density_tracker is not None:
+                means2d = means2d_capture[0] if means2d_capture else None
+                self.density_tracker.accumulate(means2d)
 
-        self.optimizer.step()
+        with self._phase("opt_step"):
+            self.optimizer.step()
+            loss_item = loss.item()
 
-        return loss.item(), l1_val, psnr_val
+        return loss_item, l1_val, psnr_val
 
     def renormalize_manifolds(self) -> None:
         """Re-project n_raw onto S^3 (cheap maintenance step)."""
@@ -598,6 +659,35 @@ class Trainer:
         avg_psnr = 10.0 * float(torch.log10(torch.tensor(max(avg_mse, 1e-12)).reciprocal()))
         return {"val_l1": total_l1 / n, "val_psnr": avg_psnr}
 
+    def _print_profile_breakdown(self, current_iter: int) -> None:
+        """Dump per-phase timing accumulated since warmup ended.
+
+        ms/iter is amortized over (current_iter - warmup_end). ms/event divides
+        each phase's total by its own call count — useful for sparse phases
+        (e.g. 'density' fires every densify_every iters).
+        """
+        iters_in = current_iter - self._profile_iter_start
+        if iters_in <= 0:
+            return
+        print(f"  [profile] phase breakdown over {iters_in} iters (since warmup):")
+        ordered = [
+            "sched", "data", "forward_render", "loss", "loss_extra",
+            "log_metrics", "backward", "accum", "opt_step",
+            "post_step", "density",
+        ]
+        total_ms = 0.0
+        for k in ordered:
+            if k not in self._phase_times:
+                continue
+            t = self._phase_times[k]
+            n_calls = self._phase_counts.get(k, 1)
+            ms_per_iter = 1000.0 * t / iters_in
+            ms_per_event = 1000.0 * t / n_calls
+            total_ms += ms_per_iter
+            print(f"    {k:14s}: {ms_per_iter:7.3f} ms/iter   "
+                  f"({n_calls:5d} calls, {ms_per_event:7.3f} ms/call)")
+        print(f"    {'TOTAL':14s}: {total_ms:7.3f} ms/iter  (sum of phases)")
+
     def train(self, num_iters: Optional[int] = None, log_every: Optional[int] = None,
               callback: Optional[Callable[[int, dict], None]] = None) -> dict:
         """Run the training loop.
@@ -620,112 +710,125 @@ class Trainer:
             g["name"]: g["lr"] for g in self.optimizer.param_groups
             if g["name"] in _color_group_names
         }
+        # Profiling: track wall-clock + reset-iter so we can amortize correctly.
         for i in range(1, n + 1):
-            # Log-linear LR schedule on geometric params (mirrors 3DGS).
-            if decay < 1.0:
-                t = min(i / max(n, 1), 1.0)
-                scale = decay ** t                       # 1 → decay over training
-                for group in self.optimizer.param_groups:
-                    name = group["name"]
-                    if name in self._base_lrs:
-                        group["lr"] = self._base_lrs[name] * scale
-            # #5.2 color-LR warmup: linear 0 -> base over `warmup_color` iters.
-            # Applies to whichever color group(s) the optimizer has.
-            if warmup_color > 0 and base_lr_color:
-                ramp = min(i / warmup_color, 1.0)
-                for group in self.optimizer.param_groups:
-                    if group["name"] in base_lr_color:
-                        group["lr"] = base_lr_color[group["name"]] * ramp
-            # #2.1 pose-refinement warmup: hold pose LRs at 0 until
-            # pose_warmup_iter, then snap to (lr_R, lr_t).
-            if self.pose_dR is not None:
-                p_w = self.config.pose_warmup_iter
-                tgt_R = self.config.lr_pose_rot if i >= p_w else 0.0
-                tgt_t = self.config.lr_pose_trans if i >= p_w else 0.0
-                for group in self.optimizer.param_groups:
-                    if group["name"] == "pose_dR":
-                        group["lr"] = tgt_R
-                    elif group["name"] == "pose_dt":
-                        group["lr"] = tgt_t
-            # #3.2 progressive Grassmann relaxation: scale lr_n 0 → base
-            # over [start, end]. Idle if both 0.
-            r_start = self.config.grassmann_relax_start
-            r_end = self.config.grassmann_relax_end
-            if r_end > 0 and r_end > r_start and "n" in self._base_lrs:
-                if i < r_start:
-                    n_scale = 0.0
-                elif i >= r_end:
-                    n_scale = 1.0
-                else:
-                    n_scale = (i - r_start) / max(r_end - r_start, 1)
-                # Compose with decay schedule already applied above.
-                base_n = self._base_lrs["n"]
+            # Reset timing accumulators after warmup so steady-state stats aren't
+            # polluted by CUDA-JIT / allocator warmup costs.
+            if (self.config.profile_breakdown
+                    and i == self.config.profile_warmup_iters + 1):
+                self._phase_times.clear()
+                self._phase_counts.clear()
+                self._profile_iter_start = i - 1
+                print(f"  [profile] warmup done @ iter {i - 1}; timers reset", flush=True)
+
+            with self._phase("sched"):
+                # Log-linear LR schedule on geometric params (mirrors 3DGS).
                 if decay < 1.0:
                     t = min(i / max(n, 1), 1.0)
-                    base_n = base_n * (decay ** t)
-                for group in self.optimizer.param_groups:
-                    if group["name"] == "n":
-                        group["lr"] = base_n * n_scale
+                    scale = decay ** t                       # 1 → decay over training
+                    for group in self.optimizer.param_groups:
+                        name = group["name"]
+                        if name in self._base_lrs:
+                            group["lr"] = self._base_lrs[name] * scale
+                # #5.2 color-LR warmup: linear 0 -> base over `warmup_color` iters.
+                # Applies to whichever color group(s) the optimizer has.
+                if warmup_color > 0 and base_lr_color:
+                    ramp = min(i / warmup_color, 1.0)
+                    for group in self.optimizer.param_groups:
+                        if group["name"] in base_lr_color:
+                            group["lr"] = base_lr_color[group["name"]] * ramp
+                # #2.1 pose-refinement warmup: hold pose LRs at 0 until
+                # pose_warmup_iter, then snap to (lr_R, lr_t).
+                if self.pose_dR is not None:
+                    p_w = self.config.pose_warmup_iter
+                    tgt_R = self.config.lr_pose_rot if i >= p_w else 0.0
+                    tgt_t = self.config.lr_pose_trans if i >= p_w else 0.0
+                    for group in self.optimizer.param_groups:
+                        if group["name"] == "pose_dR":
+                            group["lr"] = tgt_R
+                        elif group["name"] == "pose_dt":
+                            group["lr"] = tgt_t
+                # #3.2 progressive Grassmann relaxation: scale lr_n 0 → base
+                # over [start, end]. Idle if both 0.
+                r_start = self.config.grassmann_relax_start
+                r_end = self.config.grassmann_relax_end
+                if r_end > 0 and r_end > r_start and "n" in self._base_lrs:
+                    if i < r_start:
+                        n_scale = 0.0
+                    elif i >= r_end:
+                        n_scale = 1.0
+                    else:
+                        n_scale = (i - r_start) / max(r_end - r_start, 1)
+                    # Compose with decay schedule already applied above.
+                    base_n = self._base_lrs["n"]
+                    if decay < 1.0:
+                        t = min(i / max(n, 1), 1.0)
+                        base_n = base_n * (decay ** t)
+                    for group in self.optimizer.param_groups:
+                        if group["name"] == "n":
+                            group["lr"] = base_n * n_scale
 
             loss_val, l1_val, psnr_val = self.train_step(iter_num=i)
             running_loss += loss_val
             running_l1 += l1_val
             running_psnr += psnr_val
 
-            # #4.1 MCMC: SGLD noise on μ_spatial after the optimizer step.
-            # Independent of density_strategy: noise_lr > 0 enables it (so it
-            # can be probed atop the heuristic densifier too).
-            if (self.density_tracker is not None
-                    and self.config.density_config.mcmc_noise_lr > 0.0):
-                self.density_tracker.mcmc_noise_step(
-                    self.config.density_config, iter_num=i,
-                )
+            with self._phase("post_step"):
+                # #4.1 MCMC: SGLD noise on μ_spatial after the optimizer step.
+                # Independent of density_strategy: noise_lr > 0 enables it (so it
+                # can be probed atop the heuristic densifier too).
+                if (self.density_tracker is not None
+                        and self.config.density_config.mcmc_noise_lr > 0.0):
+                    self.density_tracker.mcmc_noise_step(
+                        self.config.density_config, iter_num=i,
+                    )
 
-            if i % self.config.renormalize_every == 0:
-                self.renormalize_manifolds()
+                if i % self.config.renormalize_every == 0:
+                    self.renormalize_manifolds()
 
-            # #6.2 hard aspect-ratio clip on Σ_3D in-plane eigenvalues.
-            if (self.config.max_aspect_ratio > 0
-                    and i % self.config.aspect_clip_every == 0):
-                clipped = self.model.clip_aspect_ratio_(self.config.max_aspect_ratio)
-                if clipped > 0:
-                    # Wipe Adam momentum on L_raw to avoid stale-direction kicks
-                    # right after the projection.
+                # #6.2 hard aspect-ratio clip on Σ_3D in-plane eigenvalues.
+                if (self.config.max_aspect_ratio > 0
+                        and i % self.config.aspect_clip_every == 0):
+                    clipped = self.model.clip_aspect_ratio_(self.config.max_aspect_ratio)
+                    if clipped > 0:
+                        # Wipe Adam momentum on L_raw to avoid stale-direction kicks
+                        # right after the projection.
+                        for group in self.optimizer.param_groups:
+                            if group["name"] == "L_raw":
+                                for p in group["params"]:
+                                    state = self.optimizer.state.get(p, {})
+                                    if "exp_avg" in state:
+                                        state["exp_avg"].zero_()
+                                    if "exp_avg_sq" in state:
+                                        state["exp_avg_sq"].zero_()
+
+                # Periodic opacity reset (Phase-A-correctness: addresses 32%-dead pathology).
+                if (self.config.opacity_reset_every > 0
+                        and i % self.config.opacity_reset_every == 0):
+                    with torch.no_grad():
+                        self.model.opacity_logit.data.fill_(self.config.opacity_reset_logit)
+                    # Also wipe Adam state for the opacity_logit param so the new logit
+                    # is not immediately overridden by stale momentum.
                     for group in self.optimizer.param_groups:
-                        if group["name"] == "L_raw":
-                            for p in group["params"]:
+                        for p in group["params"]:
+                            if p is self.model.opacity_logit:
                                 state = self.optimizer.state.get(p, {})
                                 if "exp_avg" in state:
                                     state["exp_avg"].zero_()
                                 if "exp_avg_sq" in state:
                                     state["exp_avg_sq"].zero_()
+                    print(f"  [opacity reset @ iter {i}] all logits -> "
+                          f"{self.config.opacity_reset_logit}")
 
-            # Periodic opacity reset (Phase-A-correctness: addresses 32%-dead pathology).
-            if (self.config.opacity_reset_every > 0
-                    and i % self.config.opacity_reset_every == 0):
-                with torch.no_grad():
-                    self.model.opacity_logit.data.fill_(self.config.opacity_reset_logit)
-                # Also wipe Adam state for the opacity_logit param so the new logit
-                # is not immediately overridden by stale momentum.
-                for group in self.optimizer.param_groups:
-                    for p in group["params"]:
-                        if p is self.model.opacity_logit:
-                            state = self.optimizer.state.get(p, {})
-                            if "exp_avg" in state:
-                                state["exp_avg"].zero_()
-                            if "exp_avg_sq" in state:
-                                state["exp_avg_sq"].zero_()
-                print(f"  [opacity reset @ iter {i}] all logits -> "
-                      f"{self.config.opacity_reset_logit}")
-
-            # Density control
+            # Density control (timed separately — fires every densify_every iters).
             if (self.density_tracker is not None
                     and self.config.densify_every > 0
                     and self.config.densify_start <= i <= self.config.densify_stop
                     and i % self.config.densify_every == 0):
-                stats = self.density_tracker.densify_and_prune(
-                    self.config.density_config,
-                )
+                with self._phase("density"):
+                    stats = self.density_tracker.densify_and_prune(
+                        self.config.density_config,
+                    )
                 strat = self.config.density_config.density_strategy
                 if strat == "mcmc":
                     print(f"  [density @ iter {i:5d}] mcmc relocated={stats.get('relocated', 0):4d} "
@@ -761,6 +864,11 @@ class Trainer:
                       f"psnr={avg_psnr:.2f}dB  N={self.model.N}"
                       + (f"  val_l1={info.get('val_l1', float('nan')):.4f}" if "val_l1" in info else "")
                       + (f"  val_psnr={info.get('val_psnr', float('nan')):.2f}dB" if "val_psnr" in info else ""))
+
+                if (self.config.profile_breakdown
+                        and i > self.config.profile_warmup_iters):
+                    self._print_profile_breakdown(current_iter=i)
+
                 if callback is not None:
                     callback(i, info)
 

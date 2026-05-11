@@ -42,6 +42,8 @@ image = (
         "pillow",
         "tqdm",
         "pytest",
+        "lpips",
+        "torchvision",
     )
     .pip_install(
         "git+https://github.com/graphdeco-inria/diff-gaussian-rasterization.git",
@@ -211,6 +213,10 @@ def train(
     aspect_split_threshold: float,
     use_quadratic_motion: bool,
     lr_c2: float,
+    use_s3_motion: bool,
+    lr_omega: float,
+    profile_breakdown: bool,
+    profile_warmup_iters: int,
 ) -> None:
     scene_dir = _ensure_scene_unpacked(scene)
     suffix = f"-{run_tag}" if run_tag else ""
@@ -372,6 +378,11 @@ def train(
         argv += ["--aspect_split_threshold", str(aspect_split_threshold)]
     if use_quadratic_motion:
         argv += ["--use_quadratic_motion", "--lr_c2", str(lr_c2)]
+    if use_s3_motion:
+        argv += ["--use_s3_motion", "--lr_omega", str(lr_omega)]
+    if profile_breakdown:
+        argv += ["--profile_breakdown",
+                 "--profile_warmup_iters", str(profile_warmup_iters)]
     _run(argv)
     ckpt_vol.commit()
 
@@ -559,6 +570,10 @@ def main(
     aspect_split_threshold: float = 0.0,
     use_quadratic_motion: bool = False,
     lr_c2: float = 5e-4,
+    use_s3_motion: bool = False,
+    lr_omega: float = 5e-4,
+    profile_breakdown: bool = False,
+    profile_warmup_iters: int = 200,
 ):
     """
     --cmd smoke:  short run (--iters used; default 500) at scale 4. Validates
@@ -661,6 +676,10 @@ def main(
             aspect_split_threshold=aspect_split_threshold,
             use_quadratic_motion=use_quadratic_motion,
             lr_c2=lr_c2,
+            use_s3_motion=use_s3_motion,
+            lr_omega=lr_omega,
+            profile_breakdown=profile_breakdown,
+            profile_warmup_iters=profile_warmup_iters,
         )
     elif cmd == "train":
         train.remote(
@@ -756,6 +775,10 @@ def main(
             aspect_split_threshold=aspect_split_threshold,
             use_quadratic_motion=use_quadratic_motion,
             lr_c2=lr_c2,
+            use_s3_motion=use_s3_motion,
+            lr_omega=lr_omega,
+            profile_breakdown=profile_breakdown,
+            profile_warmup_iters=profile_warmup_iters,
         )
     elif cmd == "render":
         if not ckpt:

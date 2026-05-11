@@ -382,6 +382,19 @@ def main():
                          "Adds per-Gaussian (N, 3) parameter c2 init zero.")
     ap.add_argument("--lr_c2", type=float, default=5e-4,
                     help="Adam LR for the c2 (quadratic motion) parameter group.")
+    ap.add_argument("--use_s3_motion", action="store_true",
+                    help="Enable S³ geodesic centroid motion: R(dt)=exp(dt·ω̂) ∈ SO(3) "
+                         "rotates V_k and conjugates Σ_3D. Adds per-Gaussian (N, 3) "
+                         "angular-velocity parameter omega init zero (→ identity → legacy). "
+                         "Linear Schur shift kept on top.")
+    ap.add_argument("--lr_omega", type=float, default=5e-4,
+                    help="Adam LR for the omega (S3 motion) parameter group.")
+    ap.add_argument("--profile_breakdown", action="store_true",
+                    help="Per-phase timing of train_step (CUDA-synced). Discards "
+                         "the first --profile_warmup_iters iters then prints "
+                         "amortized ms/iter per phase at every log_every.")
+    ap.add_argument("--profile_warmup_iters", type=int, default=200,
+                    help="Iters to discard before starting timing accumulation.")
     ap.add_argument("--sh_degree", type=int, default=0,
                     help="Spherical-harmonics band for per-Gaussian color. 0 keeps the "
                          "legacy constant-RGB path (color_logit). >0 swaps in sh_dc + "
@@ -532,6 +545,7 @@ def main():
         clamp_mode=args.clamp_mode,
         eps_schur=eps_schur_resolved,
         use_quadratic_motion=args.use_quadratic_motion,
+        use_s3_motion=args.use_s3_motion,
     )
     if args.sh_degree > 0:
         print(f"  Model: {model.N} Gaussians on {device} (SH degree {args.sh_degree}, "
@@ -551,6 +565,7 @@ def main():
         lr_mu_spatial=args.lr_mu_spatial * args.lr_pos_scale,
         lr_mu_time=args.lr_mu_time * args.lr_pos_scale,
         lr_c2=args.lr_c2,
+        lr_omega=args.lr_omega,
         lr_opacity=5e-2, lr_color=5e-2,
         background=torch.zeros(3, dtype=DTYPE, device=device),
         densify_every=args.densify_every,
@@ -628,6 +643,8 @@ def main():
         sh_degree_warmup_step=args.sh_degree_warmup_step,
         lambda_opacity_entropy=args.lambda_opacity_entropy,
         pose_warmup_iter=args.pose_warmup_iter,
+        profile_breakdown=args.profile_breakdown,
+        profile_warmup_iters=args.profile_warmup_iters,
     )
     if val_indices_override is not None:
         cfg_kwargs["validation_frames"] = val_indices_override

@@ -60,7 +60,8 @@ def _per_gaussian_param_names(model: TrainableGaussians) -> tuple[str, ...]:
     splits/prunes.
 
     When use_quadratic_motion is enabled, c2 is also a per-Gaussian (N, 3)
-    parameter and must follow row mutations in lockstep.
+    parameter and must follow row mutations in lockstep. Same for omega
+    when use_s3_motion is enabled.
     """
     base = (
         _GEOMETRY_PARAMS + ("sh_dc", "sh_rest")
@@ -69,6 +70,8 @@ def _per_gaussian_param_names(model: TrainableGaussians) -> tuple[str, ...]:
     )
     if getattr(model, "use_quadratic_motion", False) and getattr(model, "c2", None) is not None:
         base = base + ("c2",)
+    if getattr(model, "use_s3_motion", False) and getattr(model, "omega", None) is not None:
+        base = base + ("omega",)
     return base
 
 
@@ -497,6 +500,9 @@ class DensityTracker:
             if getattr(self.model, "use_quadratic_motion", False) and self.model.c2 is not None:
                 c2_par = self.model.c2.data[idx]
                 new_rows["c2"] = torch.cat([c2_par, c2_par], dim=0)
+            if getattr(self.model, "use_s3_motion", False) and self.model.omega is not None:
+                omega_par = self.model.omega.data[idx]
+                new_rows["omega"] = torch.cat([omega_par, omega_par], dim=0)
 
             self._append_rows(new_rows)
 
@@ -590,6 +596,12 @@ class DensityTracker:
                 sh_rest_par = self.model.sh_rest.data[idx]
                 new_rows["sh_dc"] = torch.cat([sh_dc_par, sh_dc_par], dim=0)
                 new_rows["sh_rest"] = torch.cat([sh_rest_par, sh_rest_par], dim=0)
+            if getattr(self.model, "use_quadratic_motion", False) and self.model.c2 is not None:
+                c2_par = self.model.c2.data[idx]
+                new_rows["c2"] = torch.cat([c2_par, c2_par], dim=0)
+            if getattr(self.model, "use_s3_motion", False) and self.model.omega is not None:
+                omega_par = self.model.omega.data[idx]
+                new_rows["omega"] = torch.cat([omega_par, omega_par], dim=0)
             self._append_rows(new_rows)
 
             keep_mask = torch.ones(self.model.N, dtype=torch.bool, device=mu_par.device)
