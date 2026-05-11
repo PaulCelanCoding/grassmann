@@ -208,6 +208,7 @@ def train(
     merge_every: int,
     merge_distance: float,
     merge_normal_cos: float,
+    aspect_split_threshold: float,
 ) -> None:
     scene_dir = _ensure_scene_unpacked(scene)
     suffix = f"-{run_tag}" if run_tag else ""
@@ -365,6 +366,8 @@ def train(
         argv += ["--merge_every", str(merge_every),
                  "--merge_distance", str(merge_distance),
                  "--merge_normal_cos", str(merge_normal_cos)]
+    if aspect_split_threshold > 0:
+        argv += ["--aspect_split_threshold", str(aspect_split_threshold)]
     _run(argv)
     ckpt_vol.commit()
 
@@ -511,6 +514,7 @@ def main(
     merge_every: int = 0,
     merge_distance: float = 0.0,
     merge_normal_cos: float = 0.95,
+    aspect_split_threshold: float = 0.0,
 ):
     """
     --cmd smoke:  short run (--iters used; default 500) at scale 4. Validates
@@ -610,6 +614,7 @@ def main(
             merge_every=merge_every,
             merge_distance=merge_distance,
             merge_normal_cos=merge_normal_cos,
+            aspect_split_threshold=aspect_split_threshold,
         )
     elif cmd == "train":
         train.remote(
@@ -702,6 +707,7 @@ def main(
             merge_every=merge_every,
             merge_distance=merge_distance,
             merge_normal_cos=merge_normal_cos,
+            aspect_split_threshold=aspect_split_threshold,
         )
     elif cmd == "render":
         if not ckpt:

@@ -374,6 +374,9 @@ def main():
                     help="Spatial-mean Euclidean threshold for merge (scene units).")
     ap.add_argument("--merge_normal_cos", type=float, default=0.95,
                     help="|n·n'| threshold above which two Gaussians' normals count as aligned.")
+    ap.add_argument("--aspect_split_threshold", type=float, default=0.0,
+                    help="H1: split when aspect λ_max/λ_mid > this regardless of grad. "
+                         "0 disables (default — only the legacy grad+size split fires).")
     ap.add_argument("--sh_degree", type=int, default=0,
                     help="Spherical-harmonics band for per-Gaussian color. 0 keeps the "
                          "legacy constant-RGB path (color_logit). >0 swaps in sh_dc + "
@@ -573,6 +576,7 @@ def main():
             merge_every=args.merge_every,
             merge_distance=args.merge_distance,
             merge_normal_cos=args.merge_normal_cos,
+            aspect_split_threshold=args.aspect_split_threshold,
         ),
         use_fast_rasterizer=args.use_fast_rasterizer,
         fast_raster_config=FastRasterConfig(

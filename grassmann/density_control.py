@@ -73,6 +73,12 @@ class DensityConfig:
     spatial_split_threshold: float = 0.5  # λ_max(Σ_3D) above which a stressed
                                          # Gaussian SPLITS. In scene units²; ≈
                                          # (0.7 m std) at scale 1m.
+    # H1 (geometric-only anisotropy split): if aspect_split_threshold > 0, ADDITIONALLY
+    # mark a Gaussian for split when λ_max/λ_mid > aspect_split_threshold, regardless
+    # of grad-magnitude. The legacy (stressed & big) trigger is still active; this OR's
+    # on a new geometric trigger. Useful when scene anisotropy (cables, thin edges)
+    # accumulates streaks that the hard SVD clip can only cap, not fragment.
+    aspect_split_threshold: float = 0.0  # 0 disables
     split_shrink_factor: float = 1.6     # children L_raw /= phi (variance /= phi²).
     split_offset_sigmas: float = 1.0     # split children placed at ±N·σ_max.
     max_split_per_event: int = 0         # cap on splits per cycle (0 = unlimited).
@@ -379,6 +385,14 @@ class DensityTracker:
             stressed = grads > config.grad_threshold
             big = lam_max > config.spatial_split_threshold
             split_mask = stressed & big
+            if config.aspect_split_threshold > 0.0:
+                # H1: geometric-only anisotropy split. Use middle eigenvalue
+                # (which post_schur would call λ_mid_inplane; pre-schur it is
+                # the middle of rank-3 Σ_3D). λ_max/λ_mid is the aspect.
+                _, eigs_full, _, _ = self._sigma_3d_eigs(post_schur=config.trigger_post_schur)
+                aspect = eigs_full[:, 2] / eigs_full[:, 1].clamp_min(1e-12)
+                aniso_mask = aspect > config.aspect_split_threshold
+                split_mask = split_mask | aniso_mask
             n_split = int(split_mask.sum().item())
             if n_split == 0:
                 return 0
