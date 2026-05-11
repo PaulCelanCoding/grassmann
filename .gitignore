@@ -48,6 +48,7 @@ wandb/
 output/
 outputs/
 renders_*/
+results/renders_*/
 
 # Claude Code internal state
 .claude/
