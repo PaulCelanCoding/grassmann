@@ -201,6 +201,13 @@ def train(
     mcmc_max_relocations_per_step: int,
     split_anisotropic_shrink: bool,
     split_opacity_correction: bool,
+    split_opacity_brighter: bool,
+    split_shrink_factor: float,
+    split_offset_sigmas: float,
+    trigger_post_schur: bool,
+    merge_every: int,
+    merge_distance: float,
+    merge_normal_cos: float,
 ) -> None:
     scene_dir = _ensure_scene_unpacked(scene)
     suffix = f"-{run_tag}" if run_tag else ""
@@ -346,6 +353,18 @@ def train(
         argv.append("--split_anisotropic_shrink")
     if split_opacity_correction:
         argv.append("--split_opacity_correction")
+    if split_opacity_brighter:
+        argv.append("--split_opacity_brighter")
+    if split_shrink_factor != 1.6:
+        argv += ["--split_shrink_factor", str(split_shrink_factor)]
+    if split_offset_sigmas != 1.0:
+        argv += ["--split_offset_sigmas", str(split_offset_sigmas)]
+    if trigger_post_schur:
+        argv.append("--trigger_post_schur")
+    if merge_every > 0:
+        argv += ["--merge_every", str(merge_every),
+                 "--merge_distance", str(merge_distance),
+                 "--merge_normal_cos", str(merge_normal_cos)]
     _run(argv)
     ckpt_vol.commit()
 
@@ -485,6 +504,13 @@ def main(
     mcmc_max_relocations_per_step: int = 0,
     split_anisotropic_shrink: bool = False,
     split_opacity_correction: bool = False,
+    split_opacity_brighter: bool = False,
+    split_shrink_factor: float = 1.6,
+    split_offset_sigmas: float = 1.0,
+    trigger_post_schur: bool = False,
+    merge_every: int = 0,
+    merge_distance: float = 0.0,
+    merge_normal_cos: float = 0.95,
 ):
     """
     --cmd smoke:  short run (--iters used; default 500) at scale 4. Validates
@@ -577,6 +603,13 @@ def main(
             mcmc_max_relocations_per_step=mcmc_max_relocations_per_step,
             split_anisotropic_shrink=split_anisotropic_shrink,
             split_opacity_correction=split_opacity_correction,
+            split_opacity_brighter=split_opacity_brighter,
+            split_shrink_factor=split_shrink_factor,
+            split_offset_sigmas=split_offset_sigmas,
+            trigger_post_schur=trigger_post_schur,
+            merge_every=merge_every,
+            merge_distance=merge_distance,
+            merge_normal_cos=merge_normal_cos,
         )
     elif cmd == "train":
         train.remote(
@@ -662,6 +695,13 @@ def main(
             mcmc_max_relocations_per_step=mcmc_max_relocations_per_step,
             split_anisotropic_shrink=split_anisotropic_shrink,
             split_opacity_correction=split_opacity_correction,
+            split_opacity_brighter=split_opacity_brighter,
+            split_shrink_factor=split_shrink_factor,
+            split_offset_sigmas=split_offset_sigmas,
+            trigger_post_schur=trigger_post_schur,
+            merge_every=merge_every,
+            merge_distance=merge_distance,
+            merge_normal_cos=merge_normal_cos,
         )
     elif cmd == "render":
         if not ckpt:

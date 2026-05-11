@@ -356,6 +356,24 @@ def main():
     ap.add_argument("--split_opacity_correction", action="store_true",
                     help="Bug H: o_child=1−√(1−o_parent) on split (Kheradmand "
                          "alpha-preserving). Default OFF (children share parent).")
+    ap.add_argument("--split_opacity_brighter", action="store_true",
+                    help="Bug H-inv: o_child=√(o_parent) (children brighter). "
+                         "Mutually exclusive with --split_opacity_correction.")
+    ap.add_argument("--split_shrink_factor", type=float, default=1.6,
+                    help="φ in L_raw /= φ on split (variance /= φ²). 1.0 disables shrink.")
+    ap.add_argument("--split_offset_sigmas", type=float, default=1.0,
+                    help="N in split children placed at ±N·σ_major. Original 3DGS-2D uses 1.6.")
+    ap.add_argument("--trigger_post_schur", action="store_true",
+                    help="Bug I: split/prune trigger uses post-Schur Σ_3D_t "
+                         "(rank-2, what the rasterizer renders) instead of pre-Schur Σ_3D.")
+    ap.add_argument("--merge_every", type=int, default=0,
+                    help="Bug G: merge every K densify cycles (0 disables). "
+                         "Each merge drops the lower-opacity Gaussian within "
+                         "--merge_distance whose normal aligns; combines opacities.")
+    ap.add_argument("--merge_distance", type=float, default=0.0,
+                    help="Spatial-mean Euclidean threshold for merge (scene units).")
+    ap.add_argument("--merge_normal_cos", type=float, default=0.95,
+                    help="|n·n'| threshold above which two Gaussians' normals count as aligned.")
     ap.add_argument("--sh_degree", type=int, default=0,
                     help="Spherical-harmonics band for per-Gaussian color. 0 keeps the "
                          "legacy constant-RGB path (color_logit). >0 swaps in sh_dc + "
@@ -548,6 +566,13 @@ def main():
             mcmc_max_relocations_per_step=args.mcmc_max_relocations_per_step,
             split_anisotropic_shrink=args.split_anisotropic_shrink,
             split_opacity_correction=args.split_opacity_correction,
+            split_opacity_brighter=args.split_opacity_brighter,
+            split_shrink_factor=args.split_shrink_factor,
+            split_offset_sigmas=args.split_offset_sigmas,
+            trigger_post_schur=args.trigger_post_schur,
+            merge_every=args.merge_every,
+            merge_distance=args.merge_distance,
+            merge_normal_cos=args.merge_normal_cos,
         ),
         use_fast_rasterizer=args.use_fast_rasterizer,
         fast_raster_config=FastRasterConfig(
