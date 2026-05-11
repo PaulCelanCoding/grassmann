@@ -348,6 +348,14 @@ def main():
     ap.add_argument("--mcmc_max_relocations_per_step", type=int, default=0,
                     help="#4.1: cap on dead Gaussians relocated per cycle. "
                          "0 = unlimited (relocate all dead).")
+    # Bug F: anisotropic split shrinkage. Bug H: Kheradmand opacity-split.
+    ap.add_argument("--split_anisotropic_shrink", action="store_true",
+                    help="Bug F: shrink L_raw only along the major axis on "
+                         "split (1/φ on that axis, others preserved). Default "
+                         "OFF (legacy isotropic /φ — generates zombie cascade).")
+    ap.add_argument("--split_opacity_correction", action="store_true",
+                    help="Bug H: o_child=1−√(1−o_parent) on split (Kheradmand "
+                         "alpha-preserving). Default OFF (children share parent).")
     ap.add_argument("--sh_degree", type=int, default=0,
                     help="Spherical-harmonics band for per-Gaussian color. 0 keeps the "
                          "legacy constant-RGB path (color_logit). >0 swaps in sh_dc + "
@@ -538,6 +546,8 @@ def main():
             mcmc_noise_gate_k=args.mcmc_noise_gate_k,
             mcmc_noise_gate_thr=args.mcmc_noise_gate_thr,
             mcmc_max_relocations_per_step=args.mcmc_max_relocations_per_step,
+            split_anisotropic_shrink=args.split_anisotropic_shrink,
+            split_opacity_correction=args.split_opacity_correction,
         ),
         use_fast_rasterizer=args.use_fast_rasterizer,
         fast_raster_config=FastRasterConfig(

@@ -199,6 +199,8 @@ def train(
     mcmc_noise_gate_k: float,
     mcmc_noise_gate_thr: float,
     mcmc_max_relocations_per_step: int,
+    split_anisotropic_shrink: bool,
+    split_opacity_correction: bool,
 ) -> None:
     scene_dir = _ensure_scene_unpacked(scene)
     suffix = f"-{run_tag}" if run_tag else ""
@@ -340,6 +342,10 @@ def train(
                  "--mcmc_noise_gate_thr", str(mcmc_noise_gate_thr)]
     if mcmc_max_relocations_per_step > 0:
         argv += ["--mcmc_max_relocations_per_step", str(mcmc_max_relocations_per_step)]
+    if split_anisotropic_shrink:
+        argv.append("--split_anisotropic_shrink")
+    if split_opacity_correction:
+        argv.append("--split_opacity_correction")
     _run(argv)
     ckpt_vol.commit()
 
@@ -477,6 +483,8 @@ def main(
     mcmc_noise_gate_k: float = 100.0,
     mcmc_noise_gate_thr: float = 0.005,
     mcmc_max_relocations_per_step: int = 0,
+    split_anisotropic_shrink: bool = False,
+    split_opacity_correction: bool = False,
 ):
     """
     --cmd smoke:  short run (--iters used; default 500) at scale 4. Validates
@@ -567,6 +575,8 @@ def main(
             mcmc_noise_gate_k=mcmc_noise_gate_k,
             mcmc_noise_gate_thr=mcmc_noise_gate_thr,
             mcmc_max_relocations_per_step=mcmc_max_relocations_per_step,
+            split_anisotropic_shrink=split_anisotropic_shrink,
+            split_opacity_correction=split_opacity_correction,
         )
     elif cmd == "train":
         train.remote(
@@ -650,6 +660,8 @@ def main(
             mcmc_noise_gate_k=mcmc_noise_gate_k,
             mcmc_noise_gate_thr=mcmc_noise_gate_thr,
             mcmc_max_relocations_per_step=mcmc_max_relocations_per_step,
+            split_anisotropic_shrink=split_anisotropic_shrink,
+            split_opacity_correction=split_opacity_correction,
         )
     elif cmd == "render":
         if not ckpt:

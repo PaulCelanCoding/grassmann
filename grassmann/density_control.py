@@ -76,6 +76,16 @@ class DensityConfig:
     split_shrink_factor: float = 1.6     # children L_raw /= phi (variance /= phi²).
     split_offset_sigmas: float = 1.0     # split children placed at ±N·σ_max.
     max_split_per_event: int = 0         # cap on splits per cycle (0 = unlimited).
+    # Bug F: anisotropic L-shrinkage on split. The default (isotropic /φ)
+    # shrinks ALL three Σ_3D eigenvalues uniformly per split, generating
+    # tiny "zombie" Gaussians after a few cascading splits. When True,
+    # only the major-axis direction (the one being split along) shrinks by
+    # 1/φ; in-plane orthogonal directions are preserved.
+    split_anisotropic_shrink: bool = False
+    # Bug H: Kheradmand opacity-split correction. Children inherit
+    # o_child = 1 − √(1 − o_parent) so alpha-blending is preserved 1→2.
+    # Default off (matches original 3DGS: children share parent opacity).
+    split_opacity_correction: bool = False
 
     # Prune thresholds
     opacity_threshold: float = 1e-3      # prune if sigmoid(opacity_logit) < this.
@@ -365,8 +375,46 @@ class DensityTracker:
             mu_minus = torch.cat([mu_t.unsqueeze(-1), mu_x_minus], dim=-1)
 
             n_raw_par = self.model.n_raw.data[idx]
-            L_raw_par = self.model.L_raw.data[idx] / phi
-            op_par = self.model.opacity_logit.data[idx]
+            L_raw_old = self.model.L_raw.data[idx]                      # (k, 4, 3)
+
+            if config.split_anisotropic_shrink:
+                # Bug F: shrink only the major spatial direction by 1/φ.
+                # A_4 = blockdiag(1, A_3) where A_3 = I − (1 − 1/φ) u u^T
+                # acts on the OUTPUT (row) space of L_plane: A_3 u = u/φ,
+                # A_3 v = v for v ⊥ u. Then Σ_3D' = A_3 Σ_3D A_3^T scales
+                # the major eigenvalue by 1/φ² and leaves the other two
+                # untouched. We reconstruct L_raw from L_plane' so the
+                # n-component of L_raw is preserved.
+                eps = 1e-12
+                n_norm = n_raw_par.norm(dim=-1, keepdim=True).clamp_min(eps)
+                n_unit = n_raw_par / n_norm                             # (k, 4)
+                nL = torch.einsum("ki,kij->kj", n_unit, L_raw_old)      # (k, 3)
+                L_plane_old = L_raw_old - n_unit.unsqueeze(-1) * nL.unsqueeze(-2)
+                # A_4: (k, 4, 4); only the spatial 3×3 block is non-identity.
+                alpha = 1.0 - 1.0 / phi
+                uuT = major_dir.unsqueeze(-1) * major_dir.unsqueeze(-2) # (k, 3, 3)
+                I3 = torch.eye(3, dtype=L_raw_old.dtype, device=L_raw_old.device)
+                A3 = I3 - alpha * uuT                                   # (k, 3, 3)
+                # Apply A_3 to the spatial rows of L_plane only.
+                L_plane_new = L_plane_old.clone()
+                L_plane_new[..., 1:, :] = torch.einsum(
+                    "krs,ksc->krc", A3, L_plane_old[..., 1:, :]
+                )
+                # Recover L_raw: L_raw' = L_plane' + n (n^T L_raw_old).
+                L_raw_par = L_plane_new + n_unit.unsqueeze(-1) * nL.unsqueeze(-2)
+            else:
+                L_raw_par = L_raw_old / phi
+
+            op_par_raw = self.model.opacity_logit.data[idx]
+            if config.split_opacity_correction:
+                # Bug H: Kheradmand 1→2 alpha-preserving opacity split.
+                # o_child = 1 − √(1 − o_parent), so blending two children at
+                # the same depth recovers o_parent.
+                o_parent = torch.sigmoid(op_par_raw).clamp(1e-6, 1.0 - 1e-6)
+                o_child = (1.0 - (1.0 - o_parent).sqrt()).clamp(1e-6, 1.0 - 1e-6)
+                op_par = torch.log(o_child / (1.0 - o_child))
+            else:
+                op_par = op_par_raw
 
             new_rows: dict[str, Tensor] = {
                 "n_raw": torch.cat([n_raw_par, n_raw_par], dim=0),
@@ -431,8 +479,31 @@ class DensityTracker:
             mu_minus = torch.cat([mu_t_minus, mu_x], dim=-1)
 
             n_raw_par = self.model.n_raw.data[idx]
-            L_raw_par = self.model.L_raw.data[idx] / phi
-            op_par = self.model.opacity_logit.data[idx]
+            L_raw_old = self.model.L_raw.data[idx]                      # (k, 4, 3)
+
+            if config.split_anisotropic_shrink:
+                # Bug F (temporal variant): shrink ONLY the time row of L_plane
+                # by 1/φ. This scales Σ_tt → Σ_tt/φ², c_world → c_world/φ, and
+                # leaves Σ_3D unchanged. Post-Schur Σ_3D_t = Σ_3D − cc^T/σ_tt
+                # is also invariant: (c/φ)(c/φ)^T / (σ_tt/φ²) = cc^T/σ_tt.
+                eps = 1e-12
+                n_norm = n_raw_par.norm(dim=-1, keepdim=True).clamp_min(eps)
+                n_unit = n_raw_par / n_norm
+                nL = torch.einsum("ki,kij->kj", n_unit, L_raw_old)
+                L_plane_old = L_raw_old - n_unit.unsqueeze(-1) * nL.unsqueeze(-2)
+                L_plane_new = L_plane_old.clone()
+                L_plane_new[..., 0, :] = L_plane_old[..., 0, :] / phi
+                L_raw_par = L_plane_new + n_unit.unsqueeze(-1) * nL.unsqueeze(-2)
+            else:
+                L_raw_par = L_raw_old / phi
+
+            op_par_raw = self.model.opacity_logit.data[idx]
+            if config.split_opacity_correction:
+                o_parent = torch.sigmoid(op_par_raw).clamp(1e-6, 1.0 - 1e-6)
+                o_child = (1.0 - (1.0 - o_parent).sqrt()).clamp(1e-6, 1.0 - 1e-6)
+                op_par = torch.log(o_child / (1.0 - o_child))
+            else:
+                op_par = op_par_raw
 
             new_rows: dict[str, Tensor] = {
                 "n_raw": torch.cat([n_raw_par, n_raw_par], dim=0),
