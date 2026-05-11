@@ -58,10 +58,18 @@ def _per_gaussian_param_names(model: TrainableGaussians) -> tuple[str, ...]:
     `color_logit` (sh_degree=0) or `sh_dc` + `sh_rest` (sh_degree>0). Adam
     state on whichever set is present must be kept in lockstep with row-axis
     splits/prunes.
+
+    When use_quadratic_motion is enabled, c2 is also a per-Gaussian (N, 3)
+    parameter and must follow row mutations in lockstep.
     """
-    if getattr(model, "sh_degree", 0) > 0:
-        return _GEOMETRY_PARAMS + ("sh_dc", "sh_rest")
-    return _GEOMETRY_PARAMS + ("color_logit",)
+    base = (
+        _GEOMETRY_PARAMS + ("sh_dc", "sh_rest")
+        if getattr(model, "sh_degree", 0) > 0
+        else _GEOMETRY_PARAMS + ("color_logit",)
+    )
+    if getattr(model, "use_quadratic_motion", False) and getattr(model, "c2", None) is not None:
+        base = base + ("c2",)
+    return base
 
 
 @dataclass
@@ -486,6 +494,9 @@ class DensityTracker:
                 sh_rest_par = self.model.sh_rest.data[idx]
                 new_rows["sh_dc"] = torch.cat([sh_dc_par, sh_dc_par], dim=0)
                 new_rows["sh_rest"] = torch.cat([sh_rest_par, sh_rest_par], dim=0)
+            if getattr(self.model, "use_quadratic_motion", False) and self.model.c2 is not None:
+                c2_par = self.model.c2.data[idx]
+                new_rows["c2"] = torch.cat([c2_par, c2_par], dim=0)
 
             self._append_rows(new_rows)
 

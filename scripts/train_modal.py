@@ -209,6 +209,8 @@ def train(
     merge_distance: float,
     merge_normal_cos: float,
     aspect_split_threshold: float,
+    use_quadratic_motion: bool,
+    lr_c2: float,
 ) -> None:
     scene_dir = _ensure_scene_unpacked(scene)
     suffix = f"-{run_tag}" if run_tag else ""
@@ -368,6 +370,8 @@ def train(
                  "--merge_normal_cos", str(merge_normal_cos)]
     if aspect_split_threshold > 0:
         argv += ["--aspect_split_threshold", str(aspect_split_threshold)]
+    if use_quadratic_motion:
+        argv += ["--use_quadratic_motion", "--lr_c2", str(lr_c2)]
     _run(argv)
     ckpt_vol.commit()
 
@@ -414,6 +418,44 @@ def render(
     ckpt_vol.commit()
     rel = os.path.relpath(out_dir, "/checkpoints")
     print(f"\nPull renders locally:\n  modal volume get gs-checkpoints {rel} ./renders", flush=True)
+
+
+@app.function(gpu=GPU, volumes=VOLUMES, timeout=2 * 3600)
+def eval_per_frame(
+    dataset: str,
+    scene: str,
+    ckpt: str,
+    image_scale: int,
+    split: str | None,
+    split_convention: str,
+    allow_distortion: bool,
+    sigma_3d_blur: float,
+) -> None:
+    import os
+    scene_dir = _ensure_scene_unpacked(scene)
+    ckpt_path = f"/checkpoints/{ckpt}"
+    if not os.path.isfile(ckpt_path):
+        raise FileNotFoundError(f"{ckpt_path!r} not found on gs-checkpoints volume.")
+    out_dir = os.path.join(os.path.dirname(ckpt_path), "per_frame_diag")
+    argv = [
+        "python", "scripts/eval_per_frame.py",
+        "--dataset", dataset,
+        "--scene_dir", scene_dir,
+        "--ckpt", ckpt_path,
+        "--output_dir", out_dir,
+        "--image_scale", str(image_scale),
+        "--split_convention", split_convention,
+        "--device", "cuda",
+        "--sigma_3d_blur", str(sigma_3d_blur),
+    ]
+    if split is not None:
+        argv += ["--split", split]
+    if allow_distortion:
+        argv.append("--allow_distortion")
+    _run(argv)
+    ckpt_vol.commit()
+    rel = os.path.relpath(out_dir, "/checkpoints")
+    print(f"\nPull artifacts locally:\n  modal volume get gs-checkpoints {rel} ./per_frame_diag", flush=True)
 
 
 @app.local_entrypoint()
@@ -515,6 +557,8 @@ def main(
     merge_distance: float = 0.0,
     merge_normal_cos: float = 0.95,
     aspect_split_threshold: float = 0.0,
+    use_quadratic_motion: bool = False,
+    lr_c2: float = 5e-4,
 ):
     """
     --cmd smoke:  short run (--iters used; default 500) at scale 4. Validates
@@ -615,6 +659,8 @@ def main(
             merge_distance=merge_distance,
             merge_normal_cos=merge_normal_cos,
             aspect_split_threshold=aspect_split_threshold,
+            use_quadratic_motion=use_quadratic_motion,
+            lr_c2=lr_c2,
         )
     elif cmd == "train":
         train.remote(
@@ -708,6 +754,8 @@ def main(
             merge_distance=merge_distance,
             merge_normal_cos=merge_normal_cos,
             aspect_split_threshold=aspect_split_threshold,
+            use_quadratic_motion=use_quadratic_motion,
+            lr_c2=lr_c2,
         )
     elif cmd == "render":
         if not ckpt:
@@ -720,5 +768,15 @@ def main(
             sigma_3d_blur=sigma_3d_blur,
             rasterizer=rasterizer,
         )
+    elif cmd == "eval_per_frame":
+        if not ckpt:
+            raise SystemExit("--cmd eval_per_frame requires --ckpt <path-under-/checkpoints>")
+        eval_per_frame.remote(
+            dataset=dataset, scene=scene,
+            ckpt=ckpt, image_scale=image_scale,
+            split=split_arg, split_convention=split_convention,
+            allow_distortion=allow_distortion,
+            sigma_3d_blur=sigma_3d_blur,
+        )
     else:
-        raise SystemExit(f"unknown --cmd {cmd!r}; expected smoke|train|render")
+        raise SystemExit(f"unknown --cmd {cmd!r}; expected smoke|train|render|eval_per_frame")

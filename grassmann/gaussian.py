@@ -145,6 +145,9 @@ class GaussianParams:
     # makes the n=e_0 → tilted-disk transition C^∞-smooth at θ ~ √eps_schur.
     clamp_mode: str = "hard"        # "hard" | "soft"
     eps_schur: float = 1e-20        # default 1e-20 for hard; pass 1e-8 for soft
+    # Quadratic centroid motion (optional): V_3D(t) = V_k + dt·c_world/σ_tt + dt²·c2.
+    # When None or the c2 tensor is all-zero, motion stays linear (legacy).
+    c2: Optional[Tensor] = None     # (N, 3) world-space quadratic coefficient
 
     @property
     def N(self) -> int:
@@ -306,6 +309,9 @@ def condition_on_time(
 
     shift = (dt * inv_Stt_pure).unsqueeze(-1) * derived.c_world  # (N, 3)
     V_3D_t = derived.V_k + shift                                 # (N, 3)
+    # Quadratic motion: V_3D(t) += dt² · c2.  Default off (c2 None or zero).
+    if getattr(params, "c2", None) is not None:
+        V_3D_t = V_3D_t + (dt * dt).unsqueeze(-1) * params.c2
 
     cw = derived.c_world                                         # (N, 3)
     outer = cw.unsqueeze(-1) * cw.unsqueeze(-2)                  # (N, 3, 3)

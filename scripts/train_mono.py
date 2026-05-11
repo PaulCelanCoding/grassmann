@@ -377,6 +377,11 @@ def main():
     ap.add_argument("--aspect_split_threshold", type=float, default=0.0,
                     help="H1: split when aspect λ_max/λ_mid > this regardless of grad. "
                          "0 disables (default — only the legacy grad+size split fires).")
+    ap.add_argument("--use_quadratic_motion", action="store_true",
+                    help="Enable quadratic centroid motion: V_3D(t) += dt² · c2. "
+                         "Adds per-Gaussian (N, 3) parameter c2 init zero.")
+    ap.add_argument("--lr_c2", type=float, default=5e-4,
+                    help="Adam LR for the c2 (quadratic motion) parameter group.")
     ap.add_argument("--sh_degree", type=int, default=0,
                     help="Spherical-harmonics band for per-Gaussian color. 0 keeps the "
                          "legacy constant-RGB path (color_logit). >0 swaps in sh_dc + "
@@ -526,6 +531,7 @@ def main():
         mu_lr_split=args.mu_lr_split,
         clamp_mode=args.clamp_mode,
         eps_schur=eps_schur_resolved,
+        use_quadratic_motion=args.use_quadratic_motion,
     )
     if args.sh_degree > 0:
         print(f"  Model: {model.N} Gaussians on {device} (SH degree {args.sh_degree}, "
@@ -544,6 +550,7 @@ def main():
         lr_L=5e-3 * args.lr_pos_scale,
         lr_mu_spatial=args.lr_mu_spatial * args.lr_pos_scale,
         lr_mu_time=args.lr_mu_time * args.lr_pos_scale,
+        lr_c2=args.lr_c2,
         lr_opacity=5e-2, lr_color=5e-2,
         background=torch.zeros(3, dtype=DTYPE, device=device),
         densify_every=args.densify_every,

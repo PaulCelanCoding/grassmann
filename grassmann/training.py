@@ -63,6 +63,7 @@ class TrainerConfig:
     # v7-doc §7.5: per-axis μ-LR (only used when model.mu_lr_split=True).
     lr_mu_spatial: float = 1e-4
     lr_mu_time: float = 1e-3
+    lr_c2: float = 5e-4
     # Log-linear LR decay applied to geometric params (n, mu, L_raw) only.
     # 1.0 disables; <1 decays geometric LRs from base*1 to base*lr_decay over
     # num_iters via lr(t) = base * lr_decay**t. Mirrors 3DGS's position_lr_final/
@@ -215,6 +216,7 @@ class Trainer:
             lr_color=self.config.lr_color,
             lr_mu_spatial=self.config.lr_mu_spatial,
             lr_mu_time=self.config.lr_mu_time,
+            lr_c2=self.config.lr_c2,
         )
         self.optimizer = self._build_opt(model)
         # Migration: density tracker may rebuild the optimizer mid-training.
