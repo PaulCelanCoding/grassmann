@@ -48,6 +48,13 @@ wandb/
 output/
 outputs/
 renders_*/
+results/renders_*/
+
+# Rendered images from RCA evals (triptychs, quadtychs, overview figures)
+# — JSON summaries and .md writeups remain tracked.
+results/rca/blur_rca/**/triptychs/
+results/rca/blur_rca/**/quadtych_*/*.png
+results/rca/blur_rca/**/figure_overview.png
 
 # Claude Code internal state
 .claude/
