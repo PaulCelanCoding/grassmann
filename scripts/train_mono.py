@@ -92,41 +92,41 @@ def main():
                     help="Optional seed for the random initialization (n, L_raw).")
     ap.add_argument("--static_baseline", action="store_true",
                     help="Disable time conditioning (Schur step skipped, w_t=1 always). "
-                         "Establishes the static-3DGS-on-monocular-bundle floor within the "
-                         "same pipeline; gap to the full temporal run = value of time conditioning.")
+                         "Forces every Gaussian to explain every frame with no per-frame "
+                         "parameters -- a static-3DGS floor inside the same pipeline. The "
+                         "gap to a full temporal run quantifies the value of time conditioning.")
     ap.add_argument("--val_stride", type=int, default=4,
-                    help="If the loaded dataset has no val_ids (e.g. HyperNeRF interp split "
-                         "ships with val_ids=[]), construct a held-out split by taking every "
-                         "Nth frame. DyGauBench convention for HyperNeRF interp = 4 (248 train "
-                         "/ 82 val for 330-frame slice-banana). 0 disables val-split injection.")
+                    help="When the dataset ships no val split (e.g. HyperNeRF interp has "
+                         "val_ids=[]), construct one by holding out every Nth frame. "
+                         "0 disables this fallback. Default 4 matches the held-out fraction "
+                         "used in dynamic-scene benchmarks.")
     ap.add_argument("--split_convention", choices=("val_stride", "deformable_interp"),
                     default="val_stride",
                     help="How to construct train/test split when dataset ships val_ids=[]. "
-                         "'val_stride' = every val_stride-th frame is val, rest is train "
-                         "(247/83 for stride 4). 'deformable_interp' = ids[::4] is train, "
-                         "ids[2::4] is val (83/82 -- matches Deformable3DGS HyperNeRF interp "
-                         "convention; needed for iso-iter comparisons against published numbers).")
+                         "'val_stride' = every val_stride-th frame is val, rest is train. "
+                         "'deformable_interp' = ids[::4] train, ids[2::4] val -- matches the "
+                         "Deformable3DGS HyperNeRF-interp convention so val numbers are "
+                         "directly comparable to their published table.")
     ap.add_argument("--init_points_multiplier", type=int, default=1,
                     help="Replicate the init point cloud K times with small random "
-                         "perturbations (~0.01 in scene units) before constructing Gaussians. "
-                         "Used by the capacity-vs-motion diagnostic: if doubling/quadrupling N "
-                         "lifts the PSNR ceiling, the limiter is capacity, not the motion "
-                         "model. K=1 (default) is the original cloud.")
+                         "perturbations (~0.01 in scene units). Diagnostic: if doubling N "
+                         "lifts the PSNR ceiling, the limiter is capacity rather than the "
+                         "motion model. K=1 (default) keeps the original cloud.")
     ap.add_argument("--diag_single_frame", type=int, default=-1,
-                    help="Capacity-vs-motion diagnostic 2: train and validate on a single "
-                         "frame index (no time variation). Implies --static_baseline. "
-                         "Final val PSNR = the ceiling for static 3DGS on this image at "
-                         "current scale + N. If our full temporal run on the same frame "
-                         "is much lower, the gap = motion residuals. -1 disables.")
+                    help="Diagnostic: train and validate on a single frame index (no time "
+                         "variation). Implies --static_baseline. The final val PSNR is "
+                         "the static-3DGS ceiling for this image at the current scale + N; "
+                         "comparing it to the full-video run isolates motion residuals. "
+                         "-1 disables.")
     ap.add_argument("--lambda_frob", type=float, default=0.0,
-                    help="Frobenius-norm penalty on L_raw (correctness term). "
-                         "Recommended ≈1e-4. Targets the rank-1-collapse pathology where "
-                         "the optimizer routes capacity into n̂ (projector null-direction).")
+                    help="Frobenius-norm penalty on L_raw. Recommended ~1e-4. Without it "
+                         "the optimizer tends to route capacity into the n direction "
+                         "(which the projector P_n annihilates), softly collapsing rank.")
     ap.add_argument("--opacity_reset_every", type=int, default=0,
-                    help="Periodic opacity-logit reset. Every N iters, "
-                         "opacity_logit -> opacity_reset_logit; Adam state for "
-                         "opacity_logit is also zeroed. 0 disables. Standard 3DGS uses "
-                         "3000. Targets the dead-Gaussian pathology.")
+                    help="Periodic opacity-logit reset. Every N iters, opacity_logit is "
+                         "reset to --opacity_reset_logit and Adam state for it is zeroed. "
+                         "Standard 3DGS uses 3000. Frees Gaussians stuck at near-zero "
+                         "opacity. 0 disables.")
     ap.add_argument("--opacity_reset_logit", type=float, default=-5.0,
                     help="Target opacity_logit at reset. -5 -> sigmoid(-5)≈0.007.")
     ap.add_argument("--lr_decay", type=float, default=1.0,
@@ -188,9 +188,10 @@ def main():
                          "in pixels. Adds (σ_pixel · depth / focal)² · I to "
                          "Σ_3D(t_0) per-Gaussian. 0 disables. ~0.3 typical.")
     ap.add_argument("--split_anisotropic_shrink", action="store_true",
-                    help="Shrink L_raw only along the major axis on "
-                         "split (1/φ on that axis, others preserved). Default "
-                         "OFF (isotropic /φ — generates cascading 'zombie' splits).")
+                    help="Shrink L_raw only along the split (major) axis (1/φ on "
+                         "that axis, others preserved). Default OFF (isotropic /φ "
+                         "shrinks all three eigenvalues each split, so cascading "
+                         "splits rapidly produce tiny collapsed Gaussians).")
     ap.add_argument("--split_shrink_factor", type=float, default=1.6,
                     help="φ in L_raw /= φ on split (variance /= φ²). 1.0 disables shrink.")
     ap.add_argument("--split_offset_sigmas", type=float, default=1.0,
@@ -222,7 +223,6 @@ def main():
     # If the dataset ships with no val split (HyperNeRF interp ships with
     # val_ids=[]), construct one. Two conventions supported:
     #   * val_stride: every val_stride-th frame is val (rest is train).
-    #     DyGauBench convention for HyperNeRF interp -> stride 4 (247/83).
     #   * deformable_interp: train = ids[::4], val = ids[2::4]. Matches
     #     Deformable3DGS scene/dataset_readers.py (interp branch). 83/82 for
     #     330-frame slice-banana. Use this for iso-iter comparison vs.

@@ -258,9 +258,10 @@ def fast_rasterize(
     proj_mat = camera_to_proj_matrix(cam_dev, H, W, config.znear, config.zfar)
     campos = cam_dev.c.to(dtype=dtype, device=device)
 
-    # #6.1 SH-degree warmup: effective sh_degree may be capped below the
-    # model's max during early iters. Higher-band coeffs stay at init (zero)
-    # because their gradient is zero until activated.
+    # SH-degree warmup: the effective sh_degree may be capped below the
+    # model's max during early iters (standard 3DGS warmup). Higher-band
+    # coefficients stay at their zero init because their gradient is
+    # masked off until the band is activated.
     eff_sh_degree = config.sh_degree if sh_degree_override is None else sh_degree_override
     raster_settings = _GaussianRasterizationSettings(
         image_height=int(H),

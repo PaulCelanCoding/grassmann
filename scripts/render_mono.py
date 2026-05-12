@@ -1,20 +1,18 @@
 """
 Render frames from a saved monocular Grassmann checkpoint.
 
-Loads a NeRFies/DyCheck scene + a checkpoint produced by train_mono.py, then
-renders one or more specified frames and saves PNGs to --output_dir.
+Loads a NeRFies/DyCheck scene + a checkpoint produced by train_mono.py and
+saves PNGs for the requested frames to --output_dir.
 
-Defaults to the CUDA fast rasterizer (diff-gaussian-rasterization) when the
-device is cuda; falls back to the toy rasterizer on cpu (slow, smoke-only).
-
-Intended invocation: from inside Modal (see scripts/train_modal.py --cmd render).
-Local CPU runs work but are too slow for inspecting full scenes.
+Rendering goes through the CUDA fast rasterizer; --device cpu will raise
+because there is no CPU fallback. Intended invocation is from inside Modal
+(see `scripts/train_modal.py --cmd render`).
 
 Usage:
     python scripts/render_mono.py \\
         --dataset nerfies \\
         --scene_dir /data/slice-banana \\
-        --ckpt /checkpoints/<run>/trained_nerfies_median.pt \\
+        --ckpt /checkpoints/<run>/trained_nerfies.pt \\
         --frames 0,50,100 \\
         --output_dir /checkpoints/<run>/renders \\
         --device cuda \\

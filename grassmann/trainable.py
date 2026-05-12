@@ -24,16 +24,17 @@ differentiable end-to-end. Reparameterizations:
   * opacity_logit -> sigmoid -> [0, 1].
 
   * Color (two paths, gated on `sh_degree`):
-      - sh_degree = 0:   color_logit -> sigmoid -> RGB in [0, 1]^3 (constant-RGB
-        path; matches legacy behavior).
+      - sh_degree = 0:   color_logit -> sigmoid -> RGB in [0, 1]^3
+        (constant-RGB path).
       - sh_degree > 0:   sh_dc (N, 1, 3) + sh_rest (N, K-1, 3) where
         K = (sh_degree+1)^2. Concatenated to `sh: (N, K, 3)` and fed to
         diff-gaussian-rasterization; the CUDA kernel evaluates the SH
         expansion against the per-Gaussian view direction, so colors are
         view-dependent. `sh_dc` is initialized via `rgb_to_sh_dc(initial RGB)`;
-        `sh_rest` is initialized to zeros (3DGS convention). For the toy
-        CPU rasterizer fallback the DC term collapses back to constant RGB
-        via `sh_dc_to_rgb`, populated as `params.color`.
+        `sh_rest` is initialized to zeros (3DGS convention). The DC term
+        is also collapsed back to constant RGB via `sh_dc_to_rgb` and
+        stored in `params.color` for consumers that want a view-independent
+        readout (visualizers, static-baseline path).
 
   * sigma_k_pixel, sigma_k_temporal: scalars (config knobs), stored as
     buffers.
@@ -129,8 +130,8 @@ class TrainableGaussians(nn.Module):
             sh = None
         else:
             sh = torch.cat([self.sh_dc, self.sh_rest], dim=1)              # (N, K, 3)
-            # color is the DC-only collapse, used by the toy CPU rasterizer
-            # fallback (it can't evaluate view-dependent SH).
+            # View-independent RGB fallback derived from the SH DC term; the
+            # CUDA rasterizer reads `sh` directly, this is for visualizers.
             color = sh_dc_to_rgb(self.sh_dc)
 
         return GaussianParams(
@@ -155,13 +156,14 @@ class TrainableGaussians(nn.Module):
 
     @torch.no_grad()
     def clip_aspect_ratio_(self, max_ratio: float) -> int:
-        """#6.2: cap aspect ratio of in-plane covariance λ_max/λ_min ≤ max_ratio.
+        """Cap in-plane covariance aspect ratio λ_max/λ_min ≤ max_ratio.
 
         Operates on the projected factor P_n L_raw (4×3). Singular values
-        s = (s_1 ≥ s_2 ≥ s_3) of P_n L_raw correspond to eigenvalues λ_i = s_i²
-        of the 4D covariance. Floor s_min so (s_max/s_min)² ≤ max_ratio, then
-        rebuild L_raw = P_n L_raw_clipped + n (n^T L_raw)_orig (n-component is
-        in the optimizer null direction; preserved unchanged).
+        s = (s_1 ≥ s_2 ≥ s_3) of P_n L_raw correspond to eigenvalues
+        λ_i = s_i² of the 4D covariance. Floor s_min so (s_max/s_min)² ≤
+        max_ratio, then rebuild L_raw = P_n L_raw_clipped + n (n^T L_raw)_orig.
+        The n-component is in the optimizer's null direction (projected
+        away by P_n), so it is preserved unchanged.
 
         Returns the number of Gaussians that were actually clipped.
         """

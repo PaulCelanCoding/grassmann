@@ -1,15 +1,15 @@
 """Per-frame PSNR + aggregate spatial error map on a saved checkpoint.
 
 Designed to run inside the Modal training image (CUDA fast rasterizer).
-Loads the Bug F (or any) ckpt, evaluates on val frames using the same
-deformable_interp split-convention as training, computes per-frame
-PSNR/L1 + an accumulated absolute-error map, and saves PNGs + a JSON
-report. Outputs go to /checkpoints/<ckpt_dir>/per_frame_diag/.
+Loads a checkpoint, evaluates on val frames using the same split convention
+as training, computes per-frame PSNR/L1 + an accumulated absolute-error
+map, and saves PNGs + a JSON report. Outputs go to
+/checkpoints/<ckpt_dir>/per_frame_diag/.
 
 Usage (intended via `modal run train_modal.py --cmd eval_per_frame`):
     python scripts/eval_per_frame.py \\
         --dataset nerfies --scene_dir /data/slice-banana \\
-        --ckpt /checkpoints/.../trained_nerfies_spatial_slice.pt \\
+        --ckpt /checkpoints/.../trained_nerfies.pt \\
         --output_dir /checkpoints/.../per_frame_diag \\
         --image_scale 4
 """

@@ -110,7 +110,7 @@ class TrainerConfig:
     validation_frames: Optional[list[int]] = None  # which frame indices
     train_frames: Optional[list[int]] = None       # restrict train sampling to this subset
                                                    # (defaults to all T frames if None)
-    # Density control (Phase 6)
+    # Density control
     densify_every: int = 0            # 0 = disabled
     densify_start: int = 500          # don't start densification before this iteration
     densify_stop: int = 15000         # stop densification after this iteration
@@ -118,18 +118,19 @@ class TrainerConfig:
     # Fast (CUDA) rasterizer
     fast_raster_config: Optional[FastRasterConfig] = None  # defaults built if None
     # Static baseline: disable time conditioning entirely (Schur step skipped,
-    # w_t=1 always). Used to measure the "static-3DGS-on-monocular-bundle" floor
-    # within the same pipeline. The gap between this and the full temporal run
-    # quantifies the value of time conditioning.
+    # w_t = 1 always). Forces every Gaussian to explain every frame with no
+    # per-frame parameters -- gives a static-3DGS floor inside the same pipeline.
+    # The gap to a full temporal run quantifies the value of time conditioning.
     static_baseline: bool = False
-    # Correctness penalties (investigation found 32% dead, 30% high-aniso,
-    # 7% rank-1-collapsed Gaussians in unpenalized runs):
-    #   lambda_frob: Frobenius-norm penalty on L_raw -- prevents the optimizer from
-    #     soft-collapsing rank by routing capacity into the n̂ direction (which the
-    #     projector annihilates). Recommended ~1e-4.
-    #   opacity_reset_every: every N iters, reset opacity_logit to opacity_reset_logit
-    #     (mirrors the standard 3DGS opacity-reset trick). 0 disables.
-    #   opacity_reset_logit: target logit for the reset (sigmoid(-5)≈0.007).
+    # Correctness penalties:
+    #   lambda_frob: Frobenius-norm penalty on L_raw. Without it the optimizer
+    #     tends to route capacity into the n direction (annihilated by the
+    #     projector P_n), soft-collapsing rank and wasting Gaussians.
+    #     Recommended ~1e-4.
+    #   opacity_reset_every: every N iters, reset opacity_logit to
+    #     opacity_reset_logit (standard 3DGS trick that frees up Gaussians
+    #     stuck at near-zero opacity). 0 disables.
+    #   opacity_reset_logit: target logit for the reset (sigmoid(-5) ≈ 0.007).
     lambda_frob: float = 0.0
     opacity_reset_every: int = 0
     opacity_reset_logit: float = -5.0
@@ -205,9 +206,9 @@ class Trainer:
             if g["name"] in ("n", "mu", "L_raw")
         }
 
-        # Density control (Phase 6). The tracker holds a reference to the
-        # optimizer so density events can migrate Adam state in place rather
-        # than rebuilding from scratch.
+        # Density control. The tracker holds a reference to the optimizer
+        # so density events can migrate Adam state in place rather than
+        # rebuilding from scratch.
         self.density_tracker: Optional[DensityTracker] = None
         if self.config.densify_every > 0:
             self.density_tracker = DensityTracker(model, self.optimizer)

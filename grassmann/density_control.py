@@ -74,11 +74,11 @@ class DensityConfig:
                                          # (0.7 m std) at scale 1m.
     split_shrink_factor: float = 1.6     # children L_raw /= phi (variance /= phi²).
     split_offset_sigmas: float = 1.0     # split children placed at ±N·σ_max.
-    # Anisotropic L-shrinkage on split. The default (isotropic /φ)
-    # shrinks ALL three Σ_3D eigenvalues uniformly per split, generating
-    # tiny "zombie" Gaussians after a few cascading splits. When True,
-    # only the major-axis direction (the one being split along) shrinks by
-    # 1/φ; in-plane orthogonal directions are preserved.
+    # Anisotropic L-shrinkage on split. The default (isotropic /φ) shrinks
+    # all three Σ_3D eigenvalues uniformly each split, so a chain of splits
+    # rapidly produces tiny collapsed Gaussians that contribute nothing.
+    # When True, only the split direction (the major axis) shrinks by 1/φ
+    # and the two in-plane orthogonal directions are preserved.
     split_anisotropic_shrink: bool = False
 
     # Prune thresholds

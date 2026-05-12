@@ -2,57 +2,43 @@
 Gaussian model: container for Grassmann Gaussian parameters and the
 view-independent derived quantities the rasterizer needs.
 
-**Parameterization (3-plane G(3,4), projector form).**
+Implements the 3-plane G(3,4) projector parameterization of the v7
+math spec (see `docs/maths/grassmanian_gradients_v7.md`).
 
 Each Gaussian is parameterized by:
   * n  in S^3                (3 DOF, plane normal in R^4)
   * L_raw  in R^(4x3)        (12 raw scalars; column space gets projected)
-  * mu in R^4                (mean in space-time; 4 effective DOF -- a shift
-                              μ -> μ + λn changes v_0 by λn_0 and V_k by
-                              λn_{1:}; invariance of V_3D(t_0) requires
-                              n_{1:} = (n_0/Σ_tt^pure) c_world while
-                              invariance of w_t requires n_0 = 0; combined
-                              they force n = 0, contradicting ‖n‖ = 1. A
-                              14k slice-banana A/B confirmed empirically
-                              that hard-projecting μ -> P_n μ regresses val
-                              PSNR by ~0.2 dB; see
-                              results/rca/mu_dof_ab_test.md.)
+  * mu in R^4                (mean in space-time, all 4 components free --
+                              the component along n is invisible after
+                              projection, so we let the optimizer place it
+                              freely rather than hard-projecting)
   * opacity in [0, 1]
   * color   in R^3           (constant RGB; used at sh_degree=0)
   * sh      in R^(K, 3)      (optional, K=(sh_degree+1)^2; used at sh_degree>0)
   * sigma_k_pixel    scalar  (rasterizer EWA blur)
   * sigma_k_temporal scalar  (additive temporal smoothing for w_t only)
 
-The plane E_{n} subset R^4 is the orthogonal complement of n in R^4 -- a
+The plane E_{n} ⊂ R^4 is the orthogonal complement of n in R^4 -- a
 3-dimensional subspace. The projector P_n = I - n n^T sends any vector
 into E_{n}; the in-plane covariance is
 
     Sigma_4D = (P_n L_raw)(P_n L_raw)^T          (4x4 PSD, rank <= 3,
                                                   ker contains span(n))
 
-Block-decomposing along the time axis e0,
+Block-decomposing along the time axis e_0,
 
     Sigma_4D = [[ sigma_tt   c^T  ],     mu = (mu_t, mu_x)
                 [ c          Sigma_3D_full ]]
 
-time-conditioning at t = t0 is the standard Schur complement, identical
-to the legacy 2-plane code path:
+time-conditioning at t = t0 is the standard Schur complement:
 
     Sigma_3D(t0) = Sigma_3D_full - c c^T / sigma_tt    (rank <= 2: a disk)
     mu_3D(t0)   = mu_x + c (t0 - mu_t) / sigma_tt
     w_t         = exp(-(t0 - mu_t)^2 / (2 sigma_tt))
 
-This module exposes the same DerivedQuantities and condition_on_time
-contract that the legacy 2-plane parameterization used, so
-`fast_rasterizer.py`, the trainer, and the means2D-grad wiring need no
-changes when the parameterization is swapped under them.
-
-History: the legacy 2-plane G(2,4) parameterization (p, q in S^2, alpha_0,
-beta_0 in R, L in R^(2x2)) gave a rank-1 Sigma_3D(t0) which empirically
-plateaued at L1 ~ 0.108 on slice-banana (see
-results/rca/monocular_streak_and_density_control.md). The 3-plane
-reformulation makes Sigma_3D(t0) rank-2 (a disk in 3D) and removes the
-view-axis-pinning pathology by construction.
+A near-zero sigma_tt is replaced by sqrt(sigma_tt^2 + eps_schur^2) (v7-doc
+Prop 5.3) so the n -> e_0 limit (purely spatial / static-3DGS regime) is
+C^infinity-smooth and reachable from the init.
 """
 from __future__ import annotations
 
@@ -87,8 +73,9 @@ def rgb_to_sh_dc(rgb: Tensor) -> Tensor:
 def sh_dc_to_rgb(sh_dc: Tensor) -> Tensor:
     """Inverse of rgb_to_sh_dc — map SH band-0 coefficient back to display RGB.
 
-    Used by the toy CPU rasterizer fallback (which can't evaluate the full
-    SH-vs-direction expansion) and for visualization. Clamps to [0, 1].
+    Used to populate `params.color` from `sh_dc` for any consumer that wants
+    a view-independent RGB (e.g. visualizers, the static-baseline path).
+    Clamps to [0, 1].
     """
     if sh_dc.dim() < 2:
         raise ValueError(f"sh_dc must have shape (..., 1, 3); got {tuple(sh_dc.shape)}")
@@ -136,11 +123,8 @@ class GaussianParams:
 
 @dataclass
 class DerivedQuantities:
-    """View-independent quantities derived from GaussianParams.
-
-    Computed once per forward pass. Same field names as the legacy 2-plane
-    DerivedQuantities so condition_on_time / fast_rasterizer / training are
-    parameterization-agnostic.
+    """View-independent quantities derived from GaussianParams, computed
+    once per forward pass.
 
     V_k:       (N, 3)     Spatial mean in WORLD coords (= mu[..., 1:]).
     v_0:       (N,)       Temporal mean (= mu[..., 0]).
