@@ -78,10 +78,18 @@ def _ensure_interp_layout(scene: str) -> str:
     dir name for the [::4] / [2::4] split logic). We symlink the existing
     /data/<scene> into /data/interp/<scene>. Returns the path their loader expects.
     """
-    import os
+    import os, zipfile
     src = f"/data/{scene}"
     if not os.path.isdir(src):
-        raise FileNotFoundError(f"{src!r} does not exist on gs-mono volume.")
+        # Mirror train_modal.py's _ensure_scene_unpacked: try the .zip fallback.
+        zip_path = f"/data/{scene}.zip"
+        if os.path.isfile(zip_path):
+            print(f"  unpacking {zip_path} -> /data/...", flush=True)
+            with zipfile.ZipFile(zip_path) as zf:
+                zf.extractall("/data")
+            mono_vol.commit()
+        if not os.path.isdir(src):
+            raise FileNotFoundError(f"{src!r} does not exist on gs-mono volume.")
     dst_parent = "/tmp/interp"
     os.makedirs(dst_parent, exist_ok=True)
     dst = f"{dst_parent}/{scene}"
