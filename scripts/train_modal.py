@@ -134,6 +134,7 @@ def train(
     val_stride: int,
     split_convention: str,
     init_points_multiplier: int,
+    init_per_frame_stride: int,
     diag_single_frame: int,
     lambda_frob: float,
     opacity_reset_every: int,
@@ -246,6 +247,8 @@ def train(
     argv += ["--val_stride", str(val_stride),
              "--split_convention", split_convention,
              "--init_points_multiplier", str(init_points_multiplier)]
+    if init_per_frame_stride > 0:
+        argv += ["--init_per_frame_stride", str(init_per_frame_stride)]
     if diag_single_frame >= 0:
         argv += ["--diag_single_frame", str(diag_single_frame)]
     if lambda_frob > 0.0:
@@ -491,6 +494,7 @@ def main(
     val_stride: int = 4,
     split_convention: str = "val_stride",
     init_points_multiplier: int = 1,
+    init_per_frame_stride: int = 0,
     diag_single_frame: int = -1,
     lambda_frob: float = 0.0,
     opacity_reset_every: int = 0,
@@ -598,6 +602,7 @@ def main(
             val_stride=val_stride,
             split_convention=split_convention,
             init_points_multiplier=init_points_multiplier,
+            init_per_frame_stride=init_per_frame_stride,
             diag_single_frame=diag_single_frame,
             lambda_frob=lambda_frob,
             opacity_reset_every=opacity_reset_every,
@@ -697,6 +702,7 @@ def main(
             val_stride=val_stride,
             split_convention=split_convention,
             init_points_multiplier=init_points_multiplier,
+            init_per_frame_stride=init_per_frame_stride,
             diag_single_frame=diag_single_frame,
             lambda_frob=lambda_frob,
             opacity_reset_every=opacity_reset_every,

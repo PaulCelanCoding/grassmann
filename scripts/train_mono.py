@@ -72,12 +72,16 @@ def main():
     ap.add_argument("--split", type=str, default=None,
                     help="DyCheck split name (e.g. 'train', 'common'). Ignored for nerfies.")
     ap.add_argument("--init_strategy",
-                    choices=("random", "spatial_slice"),
+                    choices=("random", "spatial_slice", "frontal"),
                     default="random",
                     help="'random' (legacy): n ~ Uniform(S^3), L_raw small isotropic. "
                          "'spatial_slice' (v7-doc §7.2): n = e_0 for every Gaussian, "
                          "starting in the static-3DGS regime; tilts emerge during training "
-                         "via the bridge of Prop 5.3 (requires --clamp_mode=soft).")
+                         "via the bridge of Prop 5.3 (requires --clamp_mode=soft). "
+                         "'frontal': n = (0, d_hat) with d_hat = view ray from the "
+                         "median observed camera through the point; spatial-pure cov "
+                         "after conditioning is rank-2 with kernel along d_hat, i.e. "
+                         "the splat's flat face is parallel to the init camera's image plane.")
     ap.add_argument("--num_iters", type=int, default=5000)
     ap.add_argument("--log_every", type=int, default=200)
     ap.add_argument("--use_fast_rasterizer", action="store_true")
@@ -146,6 +150,15 @@ def main():
                          "Used by the capacity-vs-motion diagnostic: if doubling/quadrupling N "
                          "lifts the PSNR ceiling, the limiter is capacity, not the motion "
                          "model. K=1 (default) is the original cloud.")
+    ap.add_argument("--init_per_frame_stride", type=int, default=0,
+                    help="Per-frame init replication (intended for --init-strategy frontal): "
+                         "for each point with observability list obs, emit one replica per "
+                         "every-stride-th observed frame with t_init = times[obs[j]] and "
+                         "observability=[obs[j]]. Combined with frontal, every replica's n is "
+                         "the view ray from THAT frame's camera -- so each frame's render "
+                         "sees nearby-in-t replicas that are frontal to it. 0 (default) = off. "
+                         "Mutually exclusive with --init_points_multiplier>1 (different "
+                         "replication semantics).")
     ap.add_argument("--diag_single_frame", type=int, default=-1,
                     help="Capacity-vs-motion diagnostic 2: train and validate on a single "
                          "frame index (no time variation). Implies --static_baseline. "
@@ -506,6 +519,29 @@ def main():
         obs_used = obs_used * K  # each replica reuses the same observability list
         print(f"  [init_points_multiplier={K}] cloud replicated: "
               f"N={points.shape[0]} (was {ds.N_points}), perturb scale={noise_scale:.4f}")
+
+    if args.init_per_frame_stride > 0:
+        if args.init_points_multiplier > 1:
+            raise SystemExit("--init_per_frame_stride is mutually exclusive with --init_points_multiplier>1")
+        stride = args.init_per_frame_stride
+        pf_points, pf_times, pf_obs = [], [], []
+        pf_colors = [] if colors_override is not None else None
+        for i, obs in enumerate(obs_used):
+            chosen = list(obs[::stride]) if obs else [ds.T // 2]
+            for j in chosen:
+                pf_points.append(points[i])
+                pf_times.append(float(ds.times[j]))
+                pf_obs.append([int(j)])
+                if pf_colors is not None:
+                    pf_colors.append(colors_override[i])
+        points = torch.stack(pf_points, dim=0)
+        times_used = torch.tensor(pf_times, dtype=torch.float64)
+        obs_used = pf_obs
+        if pf_colors is not None:
+            colors_override = torch.stack(pf_colors, dim=0)
+        print(f"  [init_per_frame_stride={stride}] per-frame replication: "
+              f"N={points.shape[0]} (from {len(ds.observability) if ds.observability else 0} "
+              f"base points, T={ds.T} frames)")
     print(f"  Initializing {points.shape[0]} Gaussians (strategy={args.init_strategy})...")
 
     # #3.1: optional k-NN-based per-point σ²_init.
