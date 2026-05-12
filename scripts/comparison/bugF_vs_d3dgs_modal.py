@@ -20,7 +20,7 @@ What it does (single function, single GPU run):
   7. Reports train PSNR + val PSNR for both methods.
 
 Usage:
-  modal run scripts/bugF_vs_d3dgs_modal.py \
+  modal run scripts/comparison/bugF_vs_d3dgs_modal.py \
       --bugf-ckpt nerfies-slice-banana-spatial_slice-14000it-bug-F-aniso/trained_nerfies_spatial_slice.pt \
       --d3dgs-dir deformable-slice-banana-14000it-baseline-r2-scale4-2026-05-11
 
@@ -40,7 +40,7 @@ from pathlib import Path
 
 import modal
 
-REPO = Path(__file__).resolve().parent.parent
+REPO = Path(__file__).resolve().parent.parent.parent
 
 image = (
     modal.Image.from_registry(

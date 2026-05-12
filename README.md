@@ -116,11 +116,8 @@ shells out to the training script.
 - `scripts/collate_eval.py` — collate `*.json` summaries across runs
   into one markdown table.
 
-For independent baselines (Deformable3DGS, Yang 4DGS) see the
-comparison scripts under `scripts/bugF_vs_d3dgs_modal.py`,
-`scripts/quadtych_compare_modal.py`,
-`scripts/eval_yang_apples.py`, and the patches under
-`scripts/yang_4dgs_patches/`. The "bugF" prefix in those filenames is a
+For independent baselines (Deformable3DGS, Yang 4DGS) see
+`scripts/comparison/`. The "bugF" prefix in those filenames is a
 historical checkpoint label.
 
 ## Tests

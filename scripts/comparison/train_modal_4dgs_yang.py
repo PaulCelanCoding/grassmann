@@ -29,9 +29,9 @@ CUDA / image notes:
     (Wu et al. is HexPlane-deformation, same family as D3DGS, not 4D Gaussian).
 
 Usage:
-  modal run scripts/train_modal_4dgs_yang.py --cmd train --scene slice-banana \\
+  modal run scripts/comparison/train_modal_4dgs_yang.py --cmd train --scene slice-banana \\
       --iters 14000 --resolution 4
-  modal run scripts/train_modal_4dgs_yang.py --cmd render --scene slice-banana \\
+  modal run scripts/comparison/train_modal_4dgs_yang.py --cmd render --scene slice-banana \\
       --resolution 8 --out-dir /checkpoints/yang4dgs-slice-banana-14000it
 """
 import subprocess
@@ -39,8 +39,8 @@ from pathlib import Path
 
 import modal
 
-REPO = Path(__file__).resolve().parent.parent
-PATCHES_DIR = REPO / "scripts" / "yang_4dgs_patches"
+REPO = Path(__file__).resolve().parent.parent.parent
+PATCHES_DIR = REPO / "scripts" / "comparison" / "yang_4dgs_patches"
 
 YANG_REPO = "https://github.com/fudan-zvg/4d-gaussian-splatting.git"
 YANG_REV = "63725f21d4adc29669e565ae10e6b3ad6e0d1250"
@@ -151,7 +151,7 @@ def _apply_patches() -> None:
     """Copy patched files from /root/yang_patches into the cloned repo and
     surgically disable TensorBoard in train.py.
 
-    We keep the patches as standalone files in scripts/yang_4dgs_patches/ so
+    We keep the patches as standalone files in scripts/comparison/yang_4dgs_patches/ so
     they're versioned with our repo (and reviewable as diffs against upstream).
     Applied at container start rather than baked into the image so an iteration
     of the patches doesn't trigger a rasterizer rebuild.

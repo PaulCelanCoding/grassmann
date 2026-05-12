@@ -7,7 +7,7 @@ D3DGS PNGs from the deformable-baseline volume dir, and saves a 4-panel
 PNG per frame.
 
 Usage:
-    modal run scripts/quadtych_compare_modal.py \
+    modal run scripts/comparison/quadtych_compare_modal.py \
         --bugf-baseline-ckpt nerfies-slice-banana-spatial_slice-14000it-bug-F-aniso/trained_nerfies_spatial_slice.pt \
         --bugf-best-ckpt    nerfies-slice-banana-spatial_slice-14000it-bugF-maxAR200-ssim/trained_nerfies_spatial_slice.pt \
         --d3dgs-dir         deformable-slice-banana-14000it-baseline-r2-scale4-2026-05-11 \
@@ -19,7 +19,7 @@ from pathlib import Path
 
 import modal
 
-REPO = Path(__file__).resolve().parent.parent
+REPO = Path(__file__).resolve().parent.parent.parent
 
 image = (
     modal.Image.from_registry(
