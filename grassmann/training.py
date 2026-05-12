@@ -245,13 +245,6 @@ class Trainer:
     def _phase(self, key: str):
         return _PhaseTimer(self, key, self.config.profile_breakdown)
 
-    # def get_frame(self, cam_idx: int, t_idx: int) -> Tensor:
-    #     """Get the target frame for camera cam_idx at time index t_idx."""
-    #     if isinstance(self.frame_data, torch.Tensor):
-    #         return self.frame_data[cam_idx, t_idx]
-    #     else:
-    #         return self.frame_data(cam_idx, self.times[t_idx])
-
     def get_frame(self, cam_idx: int, t_idx: int) -> Tensor:
         """Get the target frame for camera cam_idx at time index t_idx.
         Always returned on the model's device so loss computations don't cross devices."""

@@ -16,7 +16,6 @@ grassmann/        # library (geometry, rasterization, training, density control)
 scripts/          # entry points (train, render, eval) + Modal wrappers
 tests/            # pytest suite
 docs/maths/       # math spec (v7)
-results/rca/      # empirical investigations + per-frame eval tables
 legacy/           # archived (unmaintained) experimental code
 ```
 
@@ -62,8 +61,7 @@ python scripts/train_mono.py \
   --init_strategy spatial_slice \
   --clamp_mode soft \
   --sigma_init_sq 0.02 \
-  --mu_lr_split \
-  --grassmann_relax_start 500 --grassmann_relax_end 1500 \
+  --grassmann_relax_start 1000 --grassmann_relax_end 8000 \
   --structural_kind ssim --lambda_structural 0.2 \
   --max_aspect_ratio 1000000 \
   --random_background \
@@ -89,12 +87,11 @@ Recipe highlights:
   isotropic /φ shrink.
 - `--max_aspect_ratio 1000000`: effectively uncapped in-plane aspect.
   `--structural_kind ssim`: 1-SSIM (DSSIM) structural loss. Together
-  these match the strongest mono baseline observed (see
-  `results/rca/blur_rca.md`).
+  these match the strongest mono baseline observed.
 
 Quality numbers from this recipe on slice-banana (14k iters, image
 scale 4): val PSNR around 24.5 dB, val LPIPS 0.41, walltime around
-300 s on an L4. See `results/rca/blur_rca/uncapped_ssim_lpips/`.
+300 s on an L4.
 
 ## Training — Modal (L4)
 
@@ -127,8 +124,7 @@ comparison scripts under `scripts/bugF_vs_d3dgs_modal.py`,
 `scripts/quadtych_compare_modal.py`,
 `scripts/eval_yang_apples.py`, and the patches under
 `scripts/yang_4dgs_patches/`. The "bugF" prefix in those filenames is a
-historical checkpoint label preserved so the on-disk comparison
-artifacts in `results/rca/` continue to round-trip.
+historical checkpoint label.
 
 ## Tests
 
@@ -139,9 +135,7 @@ pytest tests/ -q
 The active suite covers the surviving (3-plane G(3,4)) paths: numerical
 correctness of `compute_derived` / `condition_on_time`, the projection
 Jacobian against autograd, dataset loaders, and a numerical-cliff
-fuzzer for the Jacobian (`scripts/stress_test_jacobian.py`). A
-collection of legacy 2-plane tests is parked behind `collect_ignore`
-in `tests/conftest.py` and will be ported or dropped in a follow-up.
+fuzzer for the Jacobian (`scripts/stress_test_jacobian.py`).
 
 ## Agent contributors
 
