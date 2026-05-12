@@ -1,11 +1,10 @@
-# Grassmann GS — Grassmannian Gaussian Splatting on Monocular Video
+# Grassmann GS — Grassmannian Splatting on Monocular Video
 
-Implementation of a Grassmannian-based Gaussian splatting pipeline for
-monocular video reconstruction. Each Gaussian is parameterized by a
-3-dimensional plane in R^4 (a point on the Grassmannian G(3, 4)) plus a
-covariance factor over that plane, so it represents a thin "disk" in
-space–time that becomes a moving 2D Gaussian splat under perspective
-projection.
+Implementation of a Grassmannian splatting pipeline for monocular video
+reconstruction. Each primitive is parameterized by a 3-dimensional plane
+in R^4 (a point on the Grassmannian G(3, 4)) plus a covariance factor
+over that plane, so it represents a thin "disk" in space–time that
+becomes a moving 2D splat under perspective projection.
 
 Math spec: [`docs/maths/grassmanian_gradients_v7.md`](docs/maths/grassmanian_gradients_v7.md).
 
