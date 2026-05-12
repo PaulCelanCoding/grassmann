@@ -11,7 +11,6 @@ One-time data upload (from repo root):
   modal volume put gs-mono ./data/dycheck/<scene>  /<scene>
 
 Usage:
-  modal run scripts/train_modal.py --cmd smoke --dataset nerfies --scene <scene>
   modal run scripts/train_modal.py --cmd train --dataset nerfies --scene <scene> --iters 30000
   modal run scripts/train_modal.py --cmd train --dataset dycheck --scene <scene> --split train
   modal run scripts/train_modal.py --cmd render --dataset nerfies --scene <scene> \
@@ -327,7 +326,7 @@ def eval_per_frame(
 
 @app.local_entrypoint()
 def main(
-    cmd: str = "smoke",
+    cmd: str = "train",
     dataset: str = "nerfies",
     scene: str = "slice-banana",
     iters: int = 500,
@@ -381,63 +380,13 @@ def main(
     profile_warmup_iters: int = 200,
 ):
     """
-    --cmd smoke:  short run (--iters used; default 500) at scale 4. Validates
-                  code path AND prints per-log_every loss to confirm convergence.
-    --cmd train:  full run at scale 2 (default --iters 30000).
+    --cmd train:  full run at scale 2 (default --iters 30000). For a quick
+                  smoke run pass --iters 200.
     --cmd render: load --ckpt (path under /checkpoints), render --frames via CUDA.
     """
     split_arg = split or None
     seed_arg = None if seed < 0 else seed
-    if cmd == "smoke":
-        train.remote(
-            dataset=dataset, scene=scene,
-            num_iters=iters, image_scale=4,
-            split=split_arg,
-            allow_distortion=allow_distortion,
-            log_every=log_every,
-            sigma_3d_blur=sigma_3d_blur,
-            sigma_init_sq=sigma_init_sq,
-            run_tag=run_tag,
-            seed=seed_arg,
-            static_baseline=static_baseline,
-            val_stride=val_stride,
-            split_convention=split_convention,
-            init_points_multiplier=init_points_multiplier,
-            diag_single_frame=diag_single_frame,
-            lambda_frob=lambda_frob,
-            opacity_reset_every=opacity_reset_every,
-            opacity_reset_logit=opacity_reset_logit,
-            densify_every=densify_every,
-            densify_start=densify_start,
-            densify_stop=densify_stop,
-            grad_threshold=grad_threshold,
-            spatial_split_threshold=spatial_split_threshold,
-            opacity_prune_threshold=opacity_prune_threshold,
-            scale_min_prune=scale_min_prune,
-            scale_max_prune=scale_max_prune,
-            sh_degree=sh_degree,
-            lr_decay=lr_decay,
-            lr_pos_scale=lr_pos_scale,
-            lambda_structural=lambda_structural,
-            eps_schur=eps_schur,
-            mu_lr_split=mu_lr_split,
-            lr_mu_spatial=lr_mu_spatial,
-            lr_mu_time=lr_mu_time,
-            init_points_path=init_points_path,
-            init_colors_path=init_colors_path,
-            random_background=random_background,
-            max_aspect_ratio=max_aspect_ratio,
-            temporal_split_threshold=temporal_split_threshold,
-            mip_filter_sigma_pixel=mip_filter_sigma_pixel,
-            grassmann_relax_start=grassmann_relax_start,
-            grassmann_relax_end=grassmann_relax_end,
-            split_anisotropic_shrink=split_anisotropic_shrink,
-            split_shrink_factor=split_shrink_factor,
-            split_offset_sigmas=split_offset_sigmas,
-            profile_breakdown=profile_breakdown,
-            profile_warmup_iters=profile_warmup_iters,
-        )
-    elif cmd == "train":
+    if cmd == "train":
         train.remote(
             dataset=dataset, scene=scene,
             num_iters=iters if iters != 500 else 30000,
@@ -508,4 +457,4 @@ def main(
             sigma_3d_blur=sigma_3d_blur,
         )
     else:
-        raise SystemExit(f"unknown --cmd {cmd!r}; expected smoke|train|render|eval_per_frame")
+        raise SystemExit(f"unknown --cmd {cmd!r}; expected train|render|eval_per_frame")

@@ -35,8 +35,8 @@ differentiable end-to-end. Reparameterizations:
         CPU rasterizer fallback the DC term collapses back to constant RGB
         via `sh_dc_to_rgb`, populated as `params.color`.
 
-  * sigma_k_pixel, sigma_k_temporal: scalars (config knobs). Only
-    sigma_k_pixel is optionally trainable via learn_sigma_k_pixel.
+  * sigma_k_pixel, sigma_k_temporal: scalars (config knobs), stored as
+    buffers.
 """
 from __future__ import annotations
 
@@ -63,7 +63,6 @@ class TrainableGaussians(nn.Module):
         *,
         dtype: torch.dtype = DTYPE_DEFAULT,
         device: str = "cpu",
-        learn_sigma_k_pixel: bool = False,
         sh_degree: int = 0,
         mu_lr_split: bool = False,
         eps_schur: float = 1e-8,
@@ -102,10 +101,7 @@ class TrainableGaussians(nn.Module):
             self.sh_rest = nn.Parameter(sh_rest_init)
 
         sigma_k_pixel_t = torch.tensor(float(params.sigma_k_pixel), dtype=dtype, device=device)
-        if learn_sigma_k_pixel:
-            self.sigma_k_pixel_param = nn.Parameter(sigma_k_pixel_t)
-        else:
-            self.register_buffer("sigma_k_pixel_param", sigma_k_pixel_t)
+        self.register_buffer("sigma_k_pixel_param", sigma_k_pixel_t)
 
         sigma_k_temporal_t = torch.tensor(float(params.sigma_k_temporal), dtype=dtype, device=device)
         self.register_buffer("sigma_k_temporal_param", sigma_k_temporal_t)
@@ -137,18 +133,13 @@ class TrainableGaussians(nn.Module):
             # fallback (it can't evaluate view-dependent SH).
             color = sh_dc_to_rgb(self.sh_dc)
 
-        sigma_k_pixel_v = (
-            self.sigma_k_pixel_param
-            if isinstance(self.sigma_k_pixel_param, nn.Parameter)
-            else float(self.sigma_k_pixel_param.item())
-        )
         return GaussianParams(
             n=n_unit,
             L_raw=self.L_raw,
             mu=mu_eff,
             opacity=opacity,
             color=color,
-            sigma_k_pixel=sigma_k_pixel_v,
+            sigma_k_pixel=float(self.sigma_k_pixel_param.item()),
             sigma_k_temporal=float(self.sigma_k_temporal_param.item()),
             sh=sh,
             sh_degree=self.sh_degree,
@@ -198,7 +189,6 @@ def trainable_from_params(
     *,
     dtype: torch.dtype = DTYPE_DEFAULT,
     device: str = "cpu",
-    learn_sigma_k_pixel: bool = False,
     sh_degree: int = 0,
     mu_lr_split: bool = False,
     eps_schur: float = 1e-8,
@@ -206,7 +196,6 @@ def trainable_from_params(
     """Convenience constructor."""
     return TrainableGaussians(
         params, dtype=dtype, device=device,
-        learn_sigma_k_pixel=learn_sigma_k_pixel,
         sh_degree=sh_degree,
         mu_lr_split=mu_lr_split,
         eps_schur=eps_schur,
@@ -225,7 +214,6 @@ def build_optimizer(
     lr_color: float = 2e-2,
     lr_sh_dc: float = 2.5e-3,
     lr_sh_rest_ratio: float = 1.0 / 20.0,
-    lr_sigma_k_pixel: float = 1e-2,
     lr_mu_spatial: float = 1e-4,
     lr_mu_time: float = 1e-3,
 ) -> torch.optim.Optimizer:
@@ -265,10 +253,6 @@ def build_optimizer(
         )
         param_groups.append(
             {"params": [model.sh_rest], "lr": lr_sh_dc * lr_sh_rest_ratio, "name": "sh_rest"}
-        )
-    if isinstance(model.sigma_k_pixel_param, nn.Parameter):
-        param_groups.append(
-            {"params": [model.sigma_k_pixel_param], "lr": lr_sigma_k_pixel, "name": "sigma_k_pixel"}
         )
 
     return torch.optim.Adam(param_groups)

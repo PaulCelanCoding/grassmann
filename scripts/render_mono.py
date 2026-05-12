@@ -36,24 +36,13 @@ import torch
 import torch.nn as nn
 from PIL import Image
 
-from grassmann.datasets.dycheck import load_dycheck
-from grassmann.datasets.nerfies import load_nerfies
+from grassmann.datasets import load_monocular
 from grassmann.fast_rasterizer import FastRasterConfig, fast_rasterize
 from grassmann.initialization import init_gaussians_from_points
 from grassmann.trainable import trainable_from_params
 
 
 DTYPE = torch.float32
-
-
-def _load_dataset(name, scene_dir, image_scale, split, allow_distortion):
-    if name == "nerfies":
-        return load_nerfies(scene_dir, image_scale=image_scale,
-                             allow_distortion=allow_distortion)
-    if name == "dycheck":
-        return load_dycheck(scene_dir, image_scale=image_scale, split_name=split,
-                             allow_distortion=allow_distortion)
-    raise ValueError(name)
 
 
 def _parse_frames(spec: str, T: int) -> list[int]:
@@ -92,8 +81,9 @@ def main():
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
 
     print(f"Loading {args.dataset} scene from {args.scene_dir} (image_scale={args.image_scale})")
-    ds = _load_dataset(
-        args.dataset, args.scene_dir, args.image_scale, args.split,
+    ds = load_monocular(
+        args.dataset, args.scene_dir,
+        image_scale=args.image_scale, split=args.split,
         allow_distortion=args.allow_distortion,
     )
     print(f"  T={ds.T}, points={ds.N_points}, H={ds.H}, W={ds.W}")

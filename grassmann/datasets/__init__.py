@@ -16,6 +16,7 @@ Conventions:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, List
 
 import torch
@@ -59,3 +60,28 @@ class MonocularDataset:
     @property
     def N_points(self) -> int:
         return int(self.points3D.shape[0])
+
+
+def load_monocular(
+    name: str,
+    scene_dir: Path,
+    *,
+    image_scale: int = 1,
+    split: str | None = None,
+    allow_distortion: bool = False,
+) -> MonocularDataset:
+    """Dispatch to nerfies or dycheck loader by name.
+
+    `split` is only honored for dycheck (nerfies has no splits/ directory).
+    """
+    if name == "nerfies":
+        from .nerfies import load_nerfies
+        if split is not None:
+            print("  [warning] --split is ignored for --dataset nerfies (no splits/ dir)")
+        return load_nerfies(scene_dir, image_scale=image_scale,
+                            allow_distortion=allow_distortion)
+    if name == "dycheck":
+        from .dycheck import load_dycheck
+        return load_dycheck(scene_dir, image_scale=image_scale, split_name=split,
+                            allow_distortion=allow_distortion)
+    raise ValueError(f"Unknown --dataset {name!r}; expected nerfies|dycheck")

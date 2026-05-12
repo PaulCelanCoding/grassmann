@@ -32,23 +32,12 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from grassmann.datasets.dycheck import load_dycheck  # noqa: E402
-from grassmann.datasets.nerfies import load_nerfies  # noqa: E402
+from grassmann.datasets import load_monocular  # noqa: E402
 from grassmann.fast_rasterizer import FastRasterConfig, fast_rasterize  # noqa: E402
 from grassmann.initialization import init_gaussians_from_points  # noqa: E402
 from grassmann.trainable import trainable_from_params  # noqa: E402
 
 DTYPE = torch.float32
-
-
-def _load_dataset(name, scene_dir, image_scale, split, allow_distortion):
-    if name == "nerfies":
-        return load_nerfies(scene_dir, image_scale=image_scale,
-                            allow_distortion=allow_distortion)
-    if name == "dycheck":
-        return load_dycheck(scene_dir, image_scale=image_scale, split_name=split,
-                            allow_distortion=allow_distortion)
-    raise ValueError(name)
 
 
 def main():
@@ -71,8 +60,9 @@ def main():
 
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Loading {args.dataset} from {args.scene_dir} (scale={args.image_scale})")
-    ds = _load_dataset(args.dataset, args.scene_dir, args.image_scale, args.split,
-                       allow_distortion=args.allow_distortion)
+    ds = load_monocular(args.dataset, args.scene_dir,
+                        image_scale=args.image_scale, split=args.split,
+                        allow_distortion=args.allow_distortion)
     print(f"  T={ds.T}, points={ds.N_points}, H={ds.H}, W={ds.W}")
 
     # Construct val indices same way training does.

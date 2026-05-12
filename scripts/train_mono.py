@@ -28,8 +28,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 import torch
 
-from grassmann.datasets.dycheck import load_dycheck
-from grassmann.datasets.nerfies import load_nerfies
+from grassmann.datasets import load_monocular
 from grassmann.density_control import DensityConfig
 from grassmann.fast_rasterizer import FastRasterConfig
 from grassmann.initialization import init_gaussians_from_points
@@ -38,24 +37,6 @@ from grassmann.training import Trainer, TrainerConfig
 
 
 DTYPE = torch.float32
-
-
-def _load_dataset(
-    name: str,
-    scene_dir: Path,
-    image_scale: int,
-    split: str | None,
-    allow_distortion: bool,
-):
-    if name == "nerfies":
-        if split is not None:
-            print(f"  [warning] --split is ignored for --dataset nerfies (no splits/ dir)")
-        return load_nerfies(scene_dir, image_scale=image_scale,
-                             allow_distortion=allow_distortion)
-    if name == "dycheck":
-        return load_dycheck(scene_dir, image_scale=image_scale, split_name=split,
-                             allow_distortion=allow_distortion)
-    raise ValueError(f"Unknown --dataset {name!r}; expected nerfies|dycheck")
 
 
 def main():
@@ -230,8 +211,9 @@ def main():
 
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Loading {args.dataset} scene from {args.scene_dir} (image_scale={args.image_scale})")
-    ds = _load_dataset(
-        args.dataset, args.scene_dir, args.image_scale, args.split,
+    ds = load_monocular(
+        args.dataset, args.scene_dir,
+        image_scale=args.image_scale, split=args.split,
         allow_distortion=args.allow_distortion,
     )
     print(f"  T={ds.T}, points={ds.N_points}, H={ds.H}, W={ds.W}, "
