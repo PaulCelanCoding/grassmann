@@ -115,9 +115,6 @@ def main():
     ap.add_argument("--spatial_split_threshold", type=float, default=0.5,
                     help="λ_max(Σ_3D) above which a stressed Gaussian SPLITS. "
                          "In scene units²; 0.5 ≈ (0.7m std) at scene scale 1m.")
-    ap.add_argument("--max_split_per_event", type=int, default=0,
-                    help="Cap on #splits per DC cycle (0 = unlimited). Useful "
-                         "to prevent N-explosion in early iters.")
     ap.add_argument("--opacity_prune_threshold", type=float, default=1e-3,
                     help="Prune Gaussian if sigmoid(opacity_logit) < this. More "
                          "conservative than standard 3DGS (0.005).")
@@ -175,9 +172,6 @@ def main():
                          "3000. Targets the 32%%-dead pathology.")
     ap.add_argument("--opacity_reset_logit", type=float, default=-5.0,
                     help="Target opacity_logit at reset. -5 -> sigmoid(-5)≈0.007.")
-    ap.add_argument("--lambda_aniso", type=float, default=0.0,
-                    help="Bounded anisotropy penalty on Σ_3D(t_0). Trims the runaway "
-                         "λ_max/λ_min tail. 0 disables. Recommended ≈1e-3 (small).")
     ap.add_argument("--lr_decay", type=float, default=1.0,
                     help="Log-linear LR decay factor for geometric params (n, mu, "
                          "L_raw). 1.0 disables. <1 decays from base*1 to base*lr_decay "
@@ -215,20 +209,6 @@ def main():
                     help="LR for mu_spatial when --mu_lr_split (v7-doc default 1e-4).")
     ap.add_argument("--lr_mu_time", type=float, default=1e-3,
                     help="LR for mu_time when --mu_lr_split (v7-doc default 1e-3).")
-    ap.add_argument("--mu_constraint",
-                    choices=("free", "project", "reparam", "penalty"),
-                    default="free",
-                    help="μ-DOF probe (results/rca/mu_dof_ab_test.md). 'free' "
-                         "(legacy): mu is unconstrained in R^4 (~4 effective DOF). "
-                         "'project': compute_derived projects mu onto n^⊥ before "
-                         "the time-split (3 DOF, hard constraint). 'reparam': "
-                         "TrainableGaussians.forward() returns the projected mu "
-                         "(same math as 'project', projection happens upstream). "
-                         "'penalty': mu free + soft loss term λ·<n,μ>² with "
-                         "λ=--lambda_mu_penalty.")
-    ap.add_argument("--lambda_mu_penalty", type=float, default=1.0,
-                    help="Strength of the soft <n,μ>² penalty when "
-                         "--mu_constraint=penalty. 1.0 default; ignored otherwise.")
     ap.add_argument("--init_points_path", type=Path, default=None,
                     help="Override the dataset's bundled point cloud with an external "
                          "(N, 3) .npy file (e.g. from MASt3R / DUSt3R / VGGT). "
@@ -241,10 +221,6 @@ def main():
                     help="Optional (N, 3) .npy of per-point colors in [0,1]. "
                          "Only meaningful with --init_points_path. If absent, points "
                          "default to gray (0.5, 0.5, 0.5).")
-    # --- Wave A probes ---------------------------------------------------
-    ap.add_argument("--color_lr_warmup_iter", type=int, default=0,
-                    help="#5.2: linearly ramp lr_color from 0 to its base "
-                         "value over this many iters. 0 disables.")
     ap.add_argument("--random_background", action="store_true",
                     help="#7.2: per-step uniform-random RGB background "
                          "during training (validation still uses fixed bg).")
@@ -254,23 +230,9 @@ def main():
                          "30 is a sane default (penalty alone leaves p99~6.8e7).")
     ap.add_argument("--aspect_clip_every", type=int, default=100,
                     help="#6.2: how often to apply the aspect-ratio clip.")
-    ap.add_argument("--sigma_init_knn_k", type=int, default=0,
-                    help="#3.1: per-point σ²_init from k-NN distance in 4D "
-                         "(Δx, sqrt(α)·Δt). 0 disables (single --sigma_init_sq).")
-    ap.add_argument("--sigma_init_alpha_t", type=float, default=0.1,
-                    help="#3.1: temporal weight in 4D distance for k-NN σ_init.")
-    ap.add_argument("--lambda_time_coherence", type=float, default=0.0,
-                    help="#5.3: time-coherence regularizer "
-                         "‖μ_3D(t+dt/2) − μ_3D(t−dt/2)‖² · w_t1 · w_t2 weight.")
     ap.add_argument("--time_coherence_dt", type=float, default=0.05,
                     help="#5.3: dt offset (in normalized time units, "
                          "ds.times in [0,1]) for the coherence pair.")
-    ap.add_argument("--exposure_per_frame", action="store_true",
-                    help="#1.1: per-frame learnable exposure gain + bias.")
-    ap.add_argument("--lambda_exposure_reg", type=float, default=1e-3,
-                    help="#1.1: L2 reg on (log_gain, bias).")
-    ap.add_argument("--lr_exposure", type=float, default=1e-3,
-                    help="#1.1: LR for exposure params.")
     ap.add_argument("--temporal_split_threshold", type=float, default=0.0,
                     help="#4.2: Σ_tt threshold for temporal-axis split. "
                          "Stressed Gaussians with Σ_tt > thr are split along "
@@ -284,61 +246,15 @@ def main():
                     help="#7.1: resolution-aware 3D smoothing filter half-width "
                          "in pixels. Adds (σ_pixel · depth / focal)² · I to "
                          "Σ_3D(t_0) per-Gaussian. 0 disables. ~0.3 typical.")
-    ap.add_argument("--refine_poses", action="store_true",
-                    help="#2.1: per-frame so3+t pose refinement starting at "
-                         "--pose_warmup_iter.")
-    ap.add_argument("--lr_pose_rot", type=float, default=1e-5,
-                    help="#2.1: LR for per-frame so3 vector dR.")
-    ap.add_argument("--lr_pose_trans", type=float, default=1e-4,
-                    help="#2.1: LR for per-frame translation dt.")
-    ap.add_argument("--pose_warmup_iter", type=int, default=2000,
-                    help="#2.1: iter at which pose LRs become nonzero.")
-    ap.add_argument("--floater_min_views", type=int, default=0,
-                    help="#8.1: prune if active in <K iters during the DC "
-                         "window. 0 disables. ~5 is reasonable for 200-iter "
-                         "windows.")
-    ap.add_argument("--floater_eps", type=float, default=1e-3,
-                    help="#8.1: 'active' threshold on per-iter grad_norm.")
-    ap.add_argument("--mu_t_min", type=float, default=-1e10,
-                    help="trigger_audit Bug C: drop Gaussians with μ_t < this. "
-                         "Use ~-0.05 for NeRFies (t∈[0,1] with margin). 1e-10 disables.")
-    ap.add_argument("--mu_t_max", type=float, default=1e10,
-                    help="trigger_audit Bug C: drop Gaussians with μ_t > this. "
-                         "Use ~1.05 for NeRFies. 1e10 disables.")
-    ap.add_argument("--sh_degree_warmup_step", type=int, default=0,
-                    help="#6.1: increase eff_sh_degree by 1 every N iters "
-                         "(capped at --sh_degree). 0 disables.")
-    ap.add_argument("--lambda_opacity_entropy", type=float, default=0.0,
-                    help="#6.3: opacity-entropy reg weight. Pushes α to {0, 1}.")
     # Bug F: anisotropic split shrinkage. Bug H: Kheradmand opacity-split.
     ap.add_argument("--split_anisotropic_shrink", action="store_true",
                     help="Bug F: shrink L_raw only along the major axis on "
                          "split (1/φ on that axis, others preserved). Default "
                          "OFF (legacy isotropic /φ — generates zombie cascade).")
-    ap.add_argument("--split_opacity_correction", action="store_true",
-                    help="Bug H: o_child=1−√(1−o_parent) on split (Kheradmand "
-                         "alpha-preserving). Default OFF (children share parent).")
-    ap.add_argument("--split_opacity_brighter", action="store_true",
-                    help="Bug H-inv: o_child=√(o_parent) (children brighter). "
-                         "Mutually exclusive with --split_opacity_correction.")
     ap.add_argument("--split_shrink_factor", type=float, default=1.6,
                     help="φ in L_raw /= φ on split (variance /= φ²). 1.0 disables shrink.")
     ap.add_argument("--split_offset_sigmas", type=float, default=1.0,
                     help="N in split children placed at ±N·σ_major. Original 3DGS-2D uses 1.6.")
-    ap.add_argument("--trigger_post_schur", action="store_true",
-                    help="Bug I: split/prune trigger uses post-Schur Σ_3D_t "
-                         "(rank-2, what the rasterizer renders) instead of pre-Schur Σ_3D.")
-    ap.add_argument("--merge_every", type=int, default=0,
-                    help="Bug G: merge every K densify cycles (0 disables). "
-                         "Each merge drops the lower-opacity Gaussian within "
-                         "--merge_distance whose normal aligns; combines opacities.")
-    ap.add_argument("--merge_distance", type=float, default=0.0,
-                    help="Spatial-mean Euclidean threshold for merge (scene units).")
-    ap.add_argument("--merge_normal_cos", type=float, default=0.95,
-                    help="|n·n'| threshold above which two Gaussians' normals count as aligned.")
-    ap.add_argument("--aspect_split_threshold", type=float, default=0.0,
-                    help="H1: split when aspect λ_max/λ_mid > this regardless of grad. "
-                         "0 disables (default — only the legacy grad+size split fires).")
     ap.add_argument("--profile_breakdown", action="store_true",
                     help="Per-phase timing of train_step (CUDA-synced). Discards "
                          "the first --profile_warmup_iters iters then prints "
@@ -481,19 +397,7 @@ def main():
               f"base points, T={ds.T} frames)")
     print(f"  Initializing {points.shape[0]} Gaussians (strategy={args.init_strategy})...")
 
-    # #3.1: optional k-NN-based per-point σ²_init.
-    sigma_init_arg: float | torch.Tensor = args.sigma_init_sq
-    if args.sigma_init_knn_k > 0:
-        from grassmann.initialization import compute_knn_sigma_init_sq
-        sigma_init_arg = compute_knn_sigma_init_sq(
-            points, times_used,
-            k=args.sigma_init_knn_k,
-            alpha_t=args.sigma_init_alpha_t,
-        )
-        print(f"  [σ_init knn k={args.sigma_init_knn_k} α_t={args.sigma_init_alpha_t}] "
-              f"per-point σ²: median={sigma_init_arg.median().item():.4g}, "
-              f"min={sigma_init_arg.min().item():.4g}, max={sigma_init_arg.max().item():.4g}")
-
+    sigma_init_arg: float = args.sigma_init_sq
     params = init_gaussians_from_points(
         points,
         times_used,
@@ -513,7 +417,6 @@ def main():
     )
     model = trainable_from_params(
         params, dtype=DTYPE, device=device, sh_degree=args.sh_degree,
-        mu_constraint=args.mu_constraint,
         mu_lr_split=args.mu_lr_split,
         clamp_mode=args.clamp_mode,
         eps_schur=eps_schur_resolved,
@@ -543,25 +446,13 @@ def main():
         density_config=DensityConfig(
             grad_threshold=args.grad_threshold,
             spatial_split_threshold=args.spatial_split_threshold,
-            max_split_per_event=args.max_split_per_event,
             opacity_threshold=args.opacity_prune_threshold,
             scale_min=args.scale_min_prune,
             scale_max=args.scale_max_prune,
             temporal_split_threshold=args.temporal_split_threshold,
-            floater_min_views=args.floater_min_views,
-            floater_eps=args.floater_eps,
-            mu_t_min=args.mu_t_min,
-            mu_t_max=args.mu_t_max,
             split_anisotropic_shrink=args.split_anisotropic_shrink,
-            split_opacity_correction=args.split_opacity_correction,
-            split_opacity_brighter=args.split_opacity_brighter,
             split_shrink_factor=args.split_shrink_factor,
             split_offset_sigmas=args.split_offset_sigmas,
-            trigger_post_schur=args.trigger_post_schur,
-            merge_every=args.merge_every,
-            merge_distance=args.merge_distance,
-            merge_normal_cos=args.merge_normal_cos,
-            aspect_split_threshold=args.aspect_split_threshold,
         ),
         use_fast_rasterizer=args.use_fast_rasterizer,
         fast_raster_config=FastRasterConfig(
@@ -574,28 +465,12 @@ def main():
         lambda_frob=args.lambda_frob,
         opacity_reset_every=args.opacity_reset_every,
         opacity_reset_logit=args.opacity_reset_logit,
-        lambda_aniso=args.lambda_aniso,
         lr_decay=args.lr_decay,
-        lambda_mu_penalty=(
-            args.lambda_mu_penalty if args.mu_constraint == "penalty" else 0.0
-        ),
-        color_lr_warmup_iter=args.color_lr_warmup_iter,
         random_background=args.random_background,
         max_aspect_ratio=args.max_aspect_ratio,
         aspect_clip_every=args.aspect_clip_every,
-        lambda_time_coherence=args.lambda_time_coherence,
-        time_coherence_dt=args.time_coherence_dt,
-        exposure_per_frame=args.exposure_per_frame,
-        lambda_exposure_reg=args.lambda_exposure_reg,
-        lr_exposure=args.lr_exposure,
         grassmann_relax_start=args.grassmann_relax_start,
         grassmann_relax_end=args.grassmann_relax_end,
-        refine_poses=args.refine_poses,
-        lr_pose_rot=args.lr_pose_rot,
-        lr_pose_trans=args.lr_pose_trans,
-        sh_degree_warmup_step=args.sh_degree_warmup_step,
-        lambda_opacity_entropy=args.lambda_opacity_entropy,
-        pose_warmup_iter=args.pose_warmup_iter,
         profile_breakdown=args.profile_breakdown,
         profile_warmup_iters=args.profile_warmup_iters,
     )

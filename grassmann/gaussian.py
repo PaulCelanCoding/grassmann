@@ -112,21 +112,6 @@ class GaussianParams:
     sigma_k_temporal: temporal blur added to Sigma_tt for the w_t weight only
                       (not for the Schur complement, so the rank-2 property
                       of Sigma_3D(t0) remains exact).
-    mu_constraint: how to handle the n-component of mu (DOF probe; see
-                   results/rca/mu_dof_ab_test.md). Values:
-                     "free"     -- mu has 4 effective DOF (default; legacy).
-                     "project"  -- compute_derived replaces mu with (I - nn^T)mu
-                                   before splitting v_0/V_k; gradient flows
-                                   through the projection, so the n-component
-                                   gradient is zero. mu has 3 effective DOF.
-                     "reparam"  -- TrainableGaussians.forward() returns the
-                                   projected mu directly. Same math as
-                                   "project" but the projection happens
-                                   upstream of compute_derived (any consumer
-                                   reading params.mu sees post-projected mu).
-                     "penalty"  -- mu stays free; trainer adds a soft
-                                   lambda_mu_penalty * <n, mu>^2 term to
-                                   the loss (set via TrainerConfig).
     """
     n: Tensor                       # (N, 4)
     L_raw: Tensor                   # (N, 4, 3)
@@ -137,7 +122,6 @@ class GaussianParams:
     sigma_k_temporal: float = 0.0
     sh: Optional[Tensor] = None     # (N, K, 3) where K=(sh_degree+1)^2; None at sh_degree=0
     sh_degree: int = 0              # 0 → use color; >0 → use sh
-    mu_constraint: str = "free"     # "free" | "project" | "reparam" | "penalty"
     # v7-doc §5.1 soft-clamp probe: how to floor the temporal-axis denominators
     # in the Schur step + w_t. "hard" (default, legacy): max(Σ_tt, eps_schur)
     # via clamp_min, eps_schur=1e-20. "soft" (v7-doc Prop 5.3): replace Σ_tt
@@ -199,12 +183,6 @@ def compute_derived(params: GaussianParams) -> DerivedQuantities:
     n = params.n                                          # (N, 4) unit
     L_raw = params.L_raw                                  # (N, 4, 3)
     mu = params.mu                                        # (N, 4)
-
-    # μ-DOF probe: optionally project mu onto n^⊥ before splitting.
-    # See GaussianParams.mu_constraint docstring + results/rca/mu_dof_ab_test.md.
-    if params.mu_constraint == "project":
-        n_dot_mu = (n * mu).sum(-1, keepdim=True)         # (N, 1)
-        mu = mu - n_dot_mu * n                            # (N, 4); n^T mu' = 0
 
     # L_plane = (I - n n^T) L_raw = L_raw - n (n^T L_raw)
     nL = torch.einsum("...i,...ij->...j", n, L_raw)       # (N, 3)

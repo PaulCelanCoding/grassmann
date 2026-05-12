@@ -135,25 +135,19 @@ def train(
     lambda_frob: float,
     opacity_reset_every: int,
     opacity_reset_logit: float,
-    lambda_aniso: float,
     densify_every: int,
     densify_start: int,
     densify_stop: int,
     grad_threshold: float,
     spatial_split_threshold: float,
-    max_split_per_event: int,
     opacity_prune_threshold: float,
     scale_min_prune: float,
     scale_max_prune: float,
-    mu_t_min: float,
-    mu_t_max: float,
     sh_degree: int,
     lr_decay: float,
     lr_pos_scale: float,
     lambda_structural: float,
     structural_kind: str,
-    mu_constraint: str,
-    lambda_mu_penalty: float,
     clamp_mode: str,
     eps_schur: float,
     mu_lr_split: bool,
@@ -161,40 +155,15 @@ def train(
     lr_mu_time: float,
     init_points_path: str,
     init_colors_path: str,
-    # --- Wave A probe flags (quality_knobs_evaluation.md) ---
-    color_lr_warmup_iter: int,
     random_background: bool,
-    sigma_init_knn_k: int,
-    sigma_init_alpha_t: float,
     max_aspect_ratio: float,
-    exposure_per_frame: bool,
-    lambda_exposure_reg: float,
     temporal_split_threshold: float,
-    lambda_time_coherence: float,
-    time_coherence_dt: float,
     mip_filter_sigma_pixel: float,
-    refine_poses: bool,
-    lr_pose_rot: float,
-    lr_pose_trans: float,
-    pose_warmup_iter: int,
-    lambda_depth: float,
-    depth_model: str,
     grassmann_relax_start: int,
     grassmann_relax_end: int,
-    floater_min_views: int,
-    floater_eps: float,
-    sh_degree_warmup_step: int,
-    lambda_opacity_entropy: float,
     split_anisotropic_shrink: bool,
-    split_opacity_correction: bool,
-    split_opacity_brighter: bool,
     split_shrink_factor: float,
     split_offset_sigmas: float,
-    trigger_post_schur: bool,
-    merge_every: int,
-    merge_distance: float,
-    merge_normal_cos: float,
-    aspect_split_threshold: float,
     profile_breakdown: bool,
     profile_warmup_iters: int,
 ) -> None:
@@ -236,8 +205,6 @@ def train(
         argv += ["--opacity_reset_every", str(opacity_reset_every)]
     if opacity_reset_logit != -5.0:
         argv += ["--opacity_reset_logit", str(opacity_reset_logit)]
-    if lambda_aniso > 0.0:
-        argv += ["--lambda_aniso", str(lambda_aniso)]
     if densify_every > 0:
         argv += ["--densify_every", str(densify_every),
                  "--densify_start", str(densify_start),
@@ -249,12 +216,6 @@ def train(
             argv += ["--scale_min_prune", str(scale_min_prune)]
         if scale_max_prune != 100.0:
             argv += ["--scale_max_prune", str(scale_max_prune)]
-        if mu_t_min > -1e9:
-            argv += ["--mu_t_min", str(mu_t_min)]
-        if mu_t_max < 1e9:
-            argv += ["--mu_t_max", str(mu_t_max)]
-        if max_split_per_event > 0:
-            argv += ["--max_split_per_event", str(max_split_per_event)]
     if sh_degree > 0:
         argv += ["--sh_degree", str(sh_degree)]
     if lr_decay != 1.0:
@@ -265,10 +226,6 @@ def train(
         argv += ["--lambda_structural", str(lambda_structural)]
     if structural_kind != "boxstats":
         argv += ["--structural_kind", structural_kind]
-    if mu_constraint != "free":
-        argv += ["--mu_constraint", mu_constraint]
-    if lambda_mu_penalty != 1.0:
-        argv += ["--lambda_mu_penalty", str(lambda_mu_penalty)]
     if clamp_mode != "hard":
         argv += ["--clamp_mode", clamp_mode]
     if eps_schur > 0:
@@ -281,62 +238,23 @@ def train(
         argv += ["--init_points_path", init_points_path]
     if init_colors_path:
         argv += ["--init_colors_path", init_colors_path]
-    # --- Wave A probe flags ---
-    if color_lr_warmup_iter > 0:
-        argv += ["--color_lr_warmup_iter", str(color_lr_warmup_iter)]
     if random_background:
         argv += ["--random_background"]
-    if sigma_init_knn_k > 0:
-        argv += ["--sigma_init_knn_k", str(sigma_init_knn_k),
-                 "--sigma_init_alpha_t", str(sigma_init_alpha_t)]
     if max_aspect_ratio > 0:
         argv += ["--max_aspect_ratio", str(max_aspect_ratio)]
-    if exposure_per_frame:
-        argv += ["--exposure_per_frame",
-                 "--lambda_exposure_reg", str(lambda_exposure_reg)]
     if temporal_split_threshold > 0:
         argv += ["--temporal_split_threshold", str(temporal_split_threshold)]
-    if lambda_time_coherence > 0:
-        argv += ["--lambda_time_coherence", str(lambda_time_coherence),
-                 "--time_coherence_dt", str(time_coherence_dt)]
     if mip_filter_sigma_pixel > 0:
         argv += ["--mip_filter_sigma_pixel", str(mip_filter_sigma_pixel)]
-    if refine_poses:
-        argv += ["--refine_poses",
-                 "--lr_pose_rot", str(lr_pose_rot),
-                 "--lr_pose_trans", str(lr_pose_trans),
-                 "--pose_warmup_iter", str(pose_warmup_iter)]
-    if lambda_depth > 0:
-        argv += ["--lambda_depth", str(lambda_depth),
-                 "--depth_model", depth_model]
     if grassmann_relax_end > 0:
         argv += ["--grassmann_relax_start", str(grassmann_relax_start),
                  "--grassmann_relax_end", str(grassmann_relax_end)]
-    if floater_min_views > 0:
-        argv += ["--floater_min_views", str(floater_min_views),
-                 "--floater_eps", str(floater_eps)]
-    if sh_degree_warmup_step > 0:
-        argv += ["--sh_degree_warmup_step", str(sh_degree_warmup_step)]
-    if lambda_opacity_entropy > 0:
-        argv += ["--lambda_opacity_entropy", str(lambda_opacity_entropy)]
     if split_anisotropic_shrink:
         argv.append("--split_anisotropic_shrink")
-    if split_opacity_correction:
-        argv.append("--split_opacity_correction")
-    if split_opacity_brighter:
-        argv.append("--split_opacity_brighter")
     if split_shrink_factor != 1.6:
         argv += ["--split_shrink_factor", str(split_shrink_factor)]
     if split_offset_sigmas != 1.0:
         argv += ["--split_offset_sigmas", str(split_offset_sigmas)]
-    if trigger_post_schur:
-        argv.append("--trigger_post_schur")
-    if merge_every > 0:
-        argv += ["--merge_every", str(merge_every),
-                 "--merge_distance", str(merge_distance),
-                 "--merge_normal_cos", str(merge_normal_cos)]
-    if aspect_split_threshold > 0:
-        argv += ["--aspect_split_threshold", str(aspect_split_threshold)]
     if profile_breakdown:
         argv += ["--profile_breakdown",
                  "--profile_warmup_iters", str(profile_warmup_iters)]
@@ -450,25 +368,19 @@ def main(
     lambda_frob: float = 0.0,
     opacity_reset_every: int = 0,
     opacity_reset_logit: float = -5.0,
-    lambda_aniso: float = 0.0,
     densify_every: int = 0,
     densify_start: int = 500,
     densify_stop: int = 10000,
     grad_threshold: float = 2e-4,
     spatial_split_threshold: float = 0.5,
-    max_split_per_event: int = 0,
     opacity_prune_threshold: float = 1e-3,
     scale_min_prune: float = 1e-6,
     scale_max_prune: float = 100.0,
-    mu_t_min: float = -1e10,
-    mu_t_max: float = 1e10,
     sh_degree: int = 0,
     lr_decay: float = 1.0,
     lr_pos_scale: float = 1.0,
     lambda_structural: float = 0.2,
     structural_kind: str = "boxstats",
-    mu_constraint: str = "free",
-    lambda_mu_penalty: float = 1.0,
     clamp_mode: str = "hard",
     eps_schur: float = -1.0,
     mu_lr_split: bool = False,
@@ -476,40 +388,15 @@ def main(
     lr_mu_time: float = 1e-3,
     init_points_path: str = "",
     init_colors_path: str = "",
-    # --- Wave A probe flags (quality_knobs_evaluation.md) ---
-    color_lr_warmup_iter: int = 0,
     random_background: bool = False,
-    sigma_init_knn_k: int = 0,
-    sigma_init_alpha_t: float = 0.1,
     max_aspect_ratio: float = 0.0,
-    exposure_per_frame: bool = False,
-    lambda_exposure_reg: float = 1e-3,
     temporal_split_threshold: float = 0.0,
-    lambda_time_coherence: float = 0.0,
-    time_coherence_dt: float = 0.05,
     mip_filter_sigma_pixel: float = 0.0,
-    refine_poses: bool = False,
-    lr_pose_rot: float = 1e-5,
-    lr_pose_trans: float = 1e-4,
-    pose_warmup_iter: int = 2000,
-    lambda_depth: float = 0.0,
-    depth_model: str = "depth_anything_v2_small",
     grassmann_relax_start: int = 0,
     grassmann_relax_end: int = 0,
-    floater_min_views: int = 0,
-    floater_eps: float = 1e-3,
-    sh_degree_warmup_step: int = 0,
-    lambda_opacity_entropy: float = 0.0,
     split_anisotropic_shrink: bool = False,
-    split_opacity_correction: bool = False,
-    split_opacity_brighter: bool = False,
     split_shrink_factor: float = 1.6,
     split_offset_sigmas: float = 1.0,
-    trigger_post_schur: bool = False,
-    merge_every: int = 0,
-    merge_distance: float = 0.0,
-    merge_normal_cos: float = 0.95,
-    aspect_split_threshold: float = 0.0,
     profile_breakdown: bool = False,
     profile_warmup_iters: int = 200,
 ):
@@ -541,25 +428,19 @@ def main(
             lambda_frob=lambda_frob,
             opacity_reset_every=opacity_reset_every,
             opacity_reset_logit=opacity_reset_logit,
-            lambda_aniso=lambda_aniso,
             densify_every=densify_every,
             densify_start=densify_start,
             densify_stop=densify_stop,
             grad_threshold=grad_threshold,
             spatial_split_threshold=spatial_split_threshold,
-            max_split_per_event=max_split_per_event,
             opacity_prune_threshold=opacity_prune_threshold,
             scale_min_prune=scale_min_prune,
             scale_max_prune=scale_max_prune,
-            mu_t_min=mu_t_min,
-            mu_t_max=mu_t_max,
             sh_degree=sh_degree,
             lr_decay=lr_decay,
             lr_pos_scale=lr_pos_scale,
             lambda_structural=lambda_structural,
             structural_kind=structural_kind,
-            mu_constraint=mu_constraint,
-            lambda_mu_penalty=lambda_mu_penalty,
             clamp_mode=clamp_mode,
             eps_schur=eps_schur,
             mu_lr_split=mu_lr_split,
@@ -567,39 +448,15 @@ def main(
             lr_mu_time=lr_mu_time,
             init_points_path=init_points_path,
             init_colors_path=init_colors_path,
-            color_lr_warmup_iter=color_lr_warmup_iter,
             random_background=random_background,
-            sigma_init_knn_k=sigma_init_knn_k,
-            sigma_init_alpha_t=sigma_init_alpha_t,
             max_aspect_ratio=max_aspect_ratio,
-            exposure_per_frame=exposure_per_frame,
-            lambda_exposure_reg=lambda_exposure_reg,
             temporal_split_threshold=temporal_split_threshold,
-            lambda_time_coherence=lambda_time_coherence,
-            time_coherence_dt=time_coherence_dt,
             mip_filter_sigma_pixel=mip_filter_sigma_pixel,
-            refine_poses=refine_poses,
-            lr_pose_rot=lr_pose_rot,
-            lr_pose_trans=lr_pose_trans,
-            pose_warmup_iter=pose_warmup_iter,
-            lambda_depth=lambda_depth,
-            depth_model=depth_model,
             grassmann_relax_start=grassmann_relax_start,
             grassmann_relax_end=grassmann_relax_end,
-            floater_min_views=floater_min_views,
-            floater_eps=floater_eps,
-            sh_degree_warmup_step=sh_degree_warmup_step,
-            lambda_opacity_entropy=lambda_opacity_entropy,
             split_anisotropic_shrink=split_anisotropic_shrink,
-            split_opacity_correction=split_opacity_correction,
-            split_opacity_brighter=split_opacity_brighter,
             split_shrink_factor=split_shrink_factor,
             split_offset_sigmas=split_offset_sigmas,
-            trigger_post_schur=trigger_post_schur,
-            merge_every=merge_every,
-            merge_distance=merge_distance,
-            merge_normal_cos=merge_normal_cos,
-            aspect_split_threshold=aspect_split_threshold,
             profile_breakdown=profile_breakdown,
             profile_warmup_iters=profile_warmup_iters,
         )
@@ -624,25 +481,19 @@ def main(
             lambda_frob=lambda_frob,
             opacity_reset_every=opacity_reset_every,
             opacity_reset_logit=opacity_reset_logit,
-            lambda_aniso=lambda_aniso,
             densify_every=densify_every,
             densify_start=densify_start,
             densify_stop=densify_stop,
             grad_threshold=grad_threshold,
             spatial_split_threshold=spatial_split_threshold,
-            max_split_per_event=max_split_per_event,
             opacity_prune_threshold=opacity_prune_threshold,
             scale_min_prune=scale_min_prune,
             scale_max_prune=scale_max_prune,
-            mu_t_min=mu_t_min,
-            mu_t_max=mu_t_max,
             sh_degree=sh_degree,
             lr_decay=lr_decay,
             lr_pos_scale=lr_pos_scale,
             lambda_structural=lambda_structural,
             structural_kind=structural_kind,
-            mu_constraint=mu_constraint,
-            lambda_mu_penalty=lambda_mu_penalty,
             clamp_mode=clamp_mode,
             eps_schur=eps_schur,
             mu_lr_split=mu_lr_split,
@@ -650,39 +501,15 @@ def main(
             lr_mu_time=lr_mu_time,
             init_points_path=init_points_path,
             init_colors_path=init_colors_path,
-            color_lr_warmup_iter=color_lr_warmup_iter,
             random_background=random_background,
-            sigma_init_knn_k=sigma_init_knn_k,
-            sigma_init_alpha_t=sigma_init_alpha_t,
             max_aspect_ratio=max_aspect_ratio,
-            exposure_per_frame=exposure_per_frame,
-            lambda_exposure_reg=lambda_exposure_reg,
             temporal_split_threshold=temporal_split_threshold,
-            lambda_time_coherence=lambda_time_coherence,
-            time_coherence_dt=time_coherence_dt,
             mip_filter_sigma_pixel=mip_filter_sigma_pixel,
-            refine_poses=refine_poses,
-            lr_pose_rot=lr_pose_rot,
-            lr_pose_trans=lr_pose_trans,
-            pose_warmup_iter=pose_warmup_iter,
-            lambda_depth=lambda_depth,
-            depth_model=depth_model,
             grassmann_relax_start=grassmann_relax_start,
             grassmann_relax_end=grassmann_relax_end,
-            floater_min_views=floater_min_views,
-            floater_eps=floater_eps,
-            sh_degree_warmup_step=sh_degree_warmup_step,
-            lambda_opacity_entropy=lambda_opacity_entropy,
             split_anisotropic_shrink=split_anisotropic_shrink,
-            split_opacity_correction=split_opacity_correction,
-            split_opacity_brighter=split_opacity_brighter,
             split_shrink_factor=split_shrink_factor,
             split_offset_sigmas=split_offset_sigmas,
-            trigger_post_schur=trigger_post_schur,
-            merge_every=merge_every,
-            merge_distance=merge_distance,
-            merge_normal_cos=merge_normal_cos,
-            aspect_split_threshold=aspect_split_threshold,
             profile_breakdown=profile_breakdown,
             profile_warmup_iters=profile_warmup_iters,
         )

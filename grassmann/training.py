@@ -98,9 +98,6 @@ class TrainerConfig:
     # position_lr_init = 0.01 schedule over 30k iters. Color/opacity not scheduled
     # (3DGS does the same).
     lr_decay: float = 1.0
-    # #5.2: warmup color LR linearly from 0 -> base over the first
-    # color_lr_warmup_iter iterations. 0 disables (constant from step 1).
-    color_lr_warmup_iter: int = 0
     # #6.2: hard cap on aspect ratio λ_max/λ_min of Σ_3D in-plane eigenvalues
     # (equivalently (s_max/s_min)² of P_n L_raw singular values). 0 disables.
     # Applied every `aspect_clip_every` iters as a no-grad SVD-based projection.
@@ -140,45 +137,15 @@ class TrainerConfig:
     #   opacity_reset_every: every N iters, reset opacity_logit to opacity_reset_logit
     #     (mirrors the standard 3DGS opacity-reset trick). 0 disables.
     #   opacity_reset_logit: target logit for the reset (sigmoid(-5)≈0.007).
-    #   lambda_aniso: bounded anisotropy penalty on Σ_3D(t_0). Trims the runaway
-    #     λ_max/λ_min tail (p99 ≈ 6.8e7 in the unpenalized 50k checkpoint).
     lambda_frob: float = 0.0
     opacity_reset_every: int = 0
     opacity_reset_logit: float = -5.0
-    lambda_aniso: float = 0.0
-    # μ-DOF probe: soft penalty on <n, mu>^2 (used when mu_constraint="penalty").
-    # 0 disables. See results/rca/mu_dof_ab_test.md and the GaussianParams
-    # mu_constraint docstring for the full A/B context.
-    lambda_mu_penalty: float = 0.0
-    # #5.3 time-coherence regularizer.
-    # Penalize ‖μ_3D(t+dt) − μ_3D(t)‖² · w_t · w_{t+dt} for sampled (t, t+dt).
-    # 0 disables. Uses already-sampled t per step + dt offset (symmetric ±dt/2).
-    lambda_time_coherence: float = 0.0
-    time_coherence_dt: float = 0.05
-    # #1.1 per-frame learnable exposure: rendered ← exp(log_gain[t]) · rendered + bias[t].
-    # Compensates AE/AWB drift in NeRFies/DyCheck. lambda_exposure_reg L2's params.
-    exposure_per_frame: bool = False
-    lambda_exposure_reg: float = 1e-3
-    lr_exposure: float = 1e-3
     # #3.2 progressive Grassmann relaxation: scale lr_n from 0 → base over
     # [grassmann_relax_start, grassmann_relax_end]. Use with init_strategy=
     # spatial_slice (n=e₀ at init) so the geometry settles in the static-3DGS
     # regime before n is allowed to tilt. 0/0 disables.
     grassmann_relax_start: int = 0
     grassmann_relax_end: int = 0
-    # #2.1 pose refinement: per-frame so3 + translation perturbation.
-    # δR via exp(skew(dR)) @ R_orig, δc via c_orig + dt (world frame).
-    # LR is held at 0 until iter `pose_warmup_iter`, then ramped to lr_R / lr_t.
-    refine_poses: bool = False
-    lr_pose_rot: float = 1e-5
-    lr_pose_trans: float = 1e-4
-    pose_warmup_iter: int = 2000
-    # #6.1 SH-degree warmup: increase eff_sh_degree by 1 every N iters
-    # (capped at model's max sh_degree). 0 disables (always max).
-    sh_degree_warmup_step: int = 0
-    # #6.3 opacity entropy regularizer: push α toward {0, 1}.
-    # Loss term: -λ · mean(α log α + (1-α) log(1-α)). 0 disables.
-    lambda_opacity_entropy: float = 0.0
     # Structural-loss kind: 'boxstats' (legacy 7x7 local-mean+var matcher) or
     # 'ssim' (1 - SSIM Gaussian-windowed, matches 3DGS DSSIM term). Only
     # active when lambda_structural > 0.
@@ -267,42 +234,6 @@ class Trainer:
                 print(f"  [warning] LPIPS disabled: {e}")
                 self.lpips_fn = None
 
-        # #2.1 pose-refinement params (per-frame so3 vec + translation).
-        self.pose_dR: Optional[nn.Parameter] = None
-        self.pose_dt: Optional[nn.Parameter] = None
-        if self.config.refine_poses:
-            T = self.T
-            dev = self.model.n_raw.device
-            dt_ = self.model.n_raw.dtype
-            self.pose_dR = nn.Parameter(torch.zeros(T, 3, dtype=dt_, device=dev))
-            self.pose_dt = nn.Parameter(torch.zeros(T, 3, dtype=dt_, device=dev))
-            # LR initially 0 (warmup); ramped in train loop.
-            self.optimizer.add_param_group(
-                {"params": [self.pose_dR], "lr": 0.0, "name": "pose_dR"}
-            )
-            self.optimizer.add_param_group(
-                {"params": [self.pose_dt], "lr": 0.0, "name": "pose_dt"}
-            )
-
-        # #1.1 per-frame exposure (log_gain (T,), bias (T, 3)).
-        self.exposure_log_gain: Optional[nn.Parameter] = None
-        self.exposure_bias: Optional[nn.Parameter] = None
-        if self.config.exposure_per_frame:
-            T = self.T
-            dev = self.model.n_raw.device
-            dt = self.model.n_raw.dtype
-            self.exposure_log_gain = nn.Parameter(torch.zeros(T, dtype=dt, device=dev))
-            self.exposure_bias = nn.Parameter(torch.zeros(T, 3, dtype=dt, device=dev))
-            self.optimizer.add_param_group(
-                {"params": [self.exposure_log_gain],
-                 "lr": self.config.lr_exposure, "name": "exposure_log_gain"}
-            )
-            self.optimizer.add_param_group(
-                {"params": [self.exposure_bias],
-                 "lr": self.config.lr_exposure, "name": "exposure_bias"}
-            )
-
-        # #6.1 SH-degree warmup state.
         self.current_iter: int = 0
         self.history: dict[str, list] = {"iter": [], "loss": [], "l1": [], "psnr": [], "N": []}
         # Profiling state (used only when config.profile_breakdown).
@@ -330,28 +261,8 @@ class Trainer:
         return frame.to(device=self.model.n_raw.device)
 
     def _perturbed_camera(self, cam_idx: int):
-        """#2.1: build a Camera with R_new = exp(skew(dR)) @ R, c_new = c + dt.
-
-        Returns a new dataclass — keeps autograd live through the per-frame
-        pose params. No-op when pose refinement is disabled.
-        """
-        cam = self.cameras[cam_idx]
-        if self.pose_dR is None:
-            return cam
-        dR = self.pose_dR[cam_idx]                                # (3,)
-        dt = self.pose_dt[cam_idx]                                # (3,)
-        # Skew-symmetric matrix from so3 vec.
-        z = torch.zeros_like(dR[0])
-        K = torch.stack([
-            torch.stack([z, -dR[2], dR[1]]),
-            torch.stack([dR[2], z, -dR[0]]),
-            torch.stack([-dR[1], dR[0], z]),
-        ])
-        delta_R = torch.linalg.matrix_exp(K)                      # (3, 3)
-        R_new = delta_R @ cam.R.to(dtype=dR.dtype, device=dR.device)
-        c_new = cam.c.to(dtype=dt.dtype, device=dt.device) + dt
-        from .projection import Camera as _Cam
-        return _Cam(R=R_new, c=c_new, fx=cam.fx, fy=cam.fy, cx=cam.cx, cy=cam.cy)
+        """No-op pass-through (pose-refinement was removed)."""
+        return self.cameras[cam_idx]
 
     def render_one(self, cam_idx: int, t_value: float,
                    means2d_capture: Optional[list] = None,
@@ -371,17 +282,11 @@ class Trainer:
 
         if self.config.use_fast_rasterizer and fast_available() and params.n.is_cuda:
             fc = self.config.fast_raster_config or FastRasterConfig()
-            # #6.1 SH-degree warmup: cap effective sh_degree per current iter.
-            sh_override = None
-            warmup_step = self.config.sh_degree_warmup_step
-            if warmup_step > 0:
-                sh_override = min(fc.sh_degree, self.current_iter // warmup_step)
             return fast_rasterize(
                 params, t_value, self._perturbed_camera(cam_idx), self.H, self.W,
                 background=bg, config=fc,
                 static_baseline=self.config.static_baseline,
                 means2d_capture=means2d_capture,
-                sh_degree_override=sh_override,
             )
         # Fallback: toy rasterizer path (also used when no GPU or no extension).
         if means2d_capture is not None:
@@ -423,14 +328,6 @@ class Trainer:
                                        bg_override=bg_override)
 
         with self._phase("loss"):
-            # #1.1 per-frame exposure: rendered ← exp(g_t)·rendered + b_t.
-            # rendered is (H, W, 3) with bias broadcast on the channel dim.
-            if self.exposure_log_gain is not None:
-                g = torch.exp(self.exposure_log_gain[t_idx])                   # scalar
-                b = self.exposure_bias[t_idx]                                  # (3,)
-                rendered = (g * rendered + b).clamp(0.0, 1.0)
-
-            # Loss.
             loss = photometric_loss(
                 rendered, target,
                 lambda_l1=self.config.lambda_l1,
@@ -439,62 +336,12 @@ class Trainer:
                 lpips_fn=self.lpips_fn,
                 lambda_lpips=self.config.lambda_lpips,
             )
-            # #1.1 exposure L2 reg.
-            if (self.exposure_log_gain is not None
-                    and self.config.lambda_exposure_reg > 0.0):
-                reg = (self.exposure_log_gain ** 2).mean() + (self.exposure_bias ** 2).mean()
-                loss = loss + self.config.lambda_exposure_reg * reg
 
             # Phase-A-correctness penalties.
             if self.config.lambda_frob > 0.0:
                 # Mean-squared L_raw entries; targets the soft-rank-collapse pathology
                 # where the optimizer routes capacity into the projector's null direction.
                 loss = loss + self.config.lambda_frob * (self.model.L_raw ** 2).mean()
-            if self.config.lambda_mu_penalty > 0.0:
-                # μ-DOF probe: soft penalty <n, μ>² (forward-pass n is unit-normalized).
-                n_unit = self.model.n_raw / self.model.n_raw.norm(dim=-1, keepdim=True).clamp_min(1e-8)
-                if self.model.mu_lr_split:
-                    mu_full = torch.cat([self.model.mu_time, self.model.mu_spatial], dim=-1)
-                else:
-                    mu_full = self.model.mu
-                n_dot_mu = (n_unit * mu_full).sum(-1)
-                loss = loss + self.config.lambda_mu_penalty * (n_dot_mu ** 2).mean()
-        with self._phase("loss_extra"):
-            # Aniso / time-coherence both need a fresh forward+derived; share one.
-            _need_derived = (self.config.lambda_aniso > 0.0
-                             or self.config.lambda_time_coherence > 0.0)
-            if _need_derived:
-                from .gaussian import compute_derived, condition_on_time
-                params_now = self.model.forward()
-                d = compute_derived(params_now)
-            # #6.3 opacity entropy reg: push α toward {0, 1}.
-            if self.config.lambda_opacity_entropy > 0.0:
-                alpha = torch.sigmoid(self.model.opacity_logit).clamp(1e-6, 1 - 1e-6)
-                ent = -(alpha * torch.log(alpha) + (1 - alpha) * torch.log(1 - alpha))
-                loss = loss + self.config.lambda_opacity_entropy * ent.mean()
-
-            if self.config.lambda_aniso > 0.0:
-                # Bounded anisotropy penalty on Σ_3D(t_0). We recompute Σ_3D_t inside
-                # the model's forward graph by re-doing the projector + Schur — this
-                # is differentiable and adds modest cost (3x3 eigvalsh per Gaussian).
-                tc = condition_on_time(params_now, d, t_0=t_value)
-                eigs = torch.linalg.eigvalsh(tc.Sigma_3D_t)             # (N, 3) ascending
-                lam_max = eigs[..., 2]
-                lam_min = eigs[..., 1]                                  # smallest non-zero
-                eps = 1e-8
-                aniso_normed = ((lam_max - lam_min) / (lam_max + lam_min + eps)) ** 2
-                loss = loss + self.config.lambda_aniso * aniso_normed.mean()
-            if self.config.lambda_time_coherence > 0.0:
-                # #5.3: ‖V_3D(t+dt/2) − V_3D(t-dt/2)‖² · w_t1 · w_t2.
-                # Symmetric step keeps gradient roughly centered around t_value.
-                dt = float(self.config.time_coherence_dt)
-                tc1 = condition_on_time(params_now, d, t_0=t_value - 0.5 * dt)
-                tc2 = condition_on_time(params_now, d, t_0=t_value + 0.5 * dt)
-                diff = (tc2.V_3D_t - tc1.V_3D_t)                          # (N, 3)
-                w = (tc1.w_t * tc2.w_t).detach()                          # (N,) gate, no grad
-                tc_loss = (w * (diff * diff).sum(-1)).mean()
-                loss = loss + self.config.lambda_time_coherence * tc_loss
-
         with self._phase("log_metrics"):
             with torch.no_grad():
                 l1_val = l1_loss(rendered, target).item()
@@ -611,14 +458,6 @@ class Trainer:
         running_l1 = 0.0
         running_psnr = 0.0
         decay = self.config.lr_decay
-        warmup_color = self.config.color_lr_warmup_iter
-        # Snapshot color-group base LR(s) once. Covers both sh_degree==0
-        # ("color") and sh_degree>0 ("sh_dc", "sh_rest").
-        _color_group_names = ("color", "sh_dc", "sh_rest")
-        base_lr_color: dict[str, float] = {
-            g["name"]: g["lr"] for g in self.optimizer.param_groups
-            if g["name"] in _color_group_names
-        }
         # Profiling: track wall-clock + reset-iter so we can amortize correctly.
         for i in range(1, n + 1):
             # Reset timing accumulators after warmup so steady-state stats aren't
@@ -639,24 +478,6 @@ class Trainer:
                         name = group["name"]
                         if name in self._base_lrs:
                             group["lr"] = self._base_lrs[name] * scale
-                # #5.2 color-LR warmup: linear 0 -> base over `warmup_color` iters.
-                # Applies to whichever color group(s) the optimizer has.
-                if warmup_color > 0 and base_lr_color:
-                    ramp = min(i / warmup_color, 1.0)
-                    for group in self.optimizer.param_groups:
-                        if group["name"] in base_lr_color:
-                            group["lr"] = base_lr_color[group["name"]] * ramp
-                # #2.1 pose-refinement warmup: hold pose LRs at 0 until
-                # pose_warmup_iter, then snap to (lr_R, lr_t).
-                if self.pose_dR is not None:
-                    p_w = self.config.pose_warmup_iter
-                    tgt_R = self.config.lr_pose_rot if i >= p_w else 0.0
-                    tgt_t = self.config.lr_pose_trans if i >= p_w else 0.0
-                    for group in self.optimizer.param_groups:
-                        if group["name"] == "pose_dR":
-                            group["lr"] = tgt_R
-                        elif group["name"] == "pose_dt":
-                            group["lr"] = tgt_t
                 # #3.2 progressive Grassmann relaxation: scale lr_n 0 → base
                 # over [start, end]. Idle if both 0.
                 r_start = self.config.grassmann_relax_start

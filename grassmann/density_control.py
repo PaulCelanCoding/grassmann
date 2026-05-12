@@ -73,42 +73,14 @@ class DensityConfig:
     spatial_split_threshold: float = 0.5  # λ_max(Σ_3D) above which a stressed
                                          # Gaussian SPLITS. In scene units²; ≈
                                          # (0.7 m std) at scale 1m.
-    # H1 (geometric-only anisotropy split): if aspect_split_threshold > 0, ADDITIONALLY
-    # mark a Gaussian for split when λ_max/λ_mid > aspect_split_threshold, regardless
-    # of grad-magnitude. The legacy (stressed & big) trigger is still active; this OR's
-    # on a new geometric trigger. Useful when scene anisotropy (cables, thin edges)
-    # accumulates streaks that the hard SVD clip can only cap, not fragment.
-    aspect_split_threshold: float = 0.0  # 0 disables
     split_shrink_factor: float = 1.6     # children L_raw /= phi (variance /= phi²).
     split_offset_sigmas: float = 1.0     # split children placed at ±N·σ_max.
-    max_split_per_event: int = 0         # cap on splits per cycle (0 = unlimited).
     # Bug F: anisotropic L-shrinkage on split. The default (isotropic /φ)
     # shrinks ALL three Σ_3D eigenvalues uniformly per split, generating
     # tiny "zombie" Gaussians after a few cascading splits. When True,
     # only the major-axis direction (the one being split along) shrinks by
     # 1/φ; in-plane orthogonal directions are preserved.
     split_anisotropic_shrink: bool = False
-    # Bug H: Kheradmand opacity-split correction. Children inherit
-    # o_child = 1 − √(1 − o_parent) so alpha-blending is preserved 1→2.
-    # Default off (matches original 3DGS: children share parent opacity).
-    split_opacity_correction: bool = False
-    # Bug H-inv: opposite direction — children brighter via o_child = √(o_parent).
-    # Compensates for split children being smaller (less screen-space coverage)
-    # by boosting per-Gaussian alpha. Mutually exclusive with split_opacity_correction.
-    split_opacity_brighter: bool = False
-    # Bug I: trigger eigvals on POST-Schur Σ_3D_t = Σ_3D − cc^T/σ_tt instead
-    # of pre-Schur Σ_3D. The rasterizer sees Σ_3D_t (rank-2), so trigger
-    # thresholds should match what is actually rendered. When True, eigs[:,0]
-    # ≈ 0 (kernel), eigs[:,1] is the true in-plane λ_min, eigs[:,2] the in-plane λ_max.
-    trigger_post_schur: bool = False
-    # Bug G: nearest-neighbor merge on a cadence. Every merge_every iters,
-    # drop the lower-opacity member of any pair whose spatial means are within
-    # merge_distance AND whose normals satisfy |n^T n'| > merge_normal_cos;
-    # combine their opacities on the survivor via 1 - (1-o_a)(1-o_b).
-    # 0 disables.
-    merge_every: int = 0
-    merge_distance: float = 0.0
-    merge_normal_cos: float = 0.95
 
     # Prune thresholds
     opacity_threshold: float = 1e-3      # prune if sigmoid(opacity_logit) < this.
@@ -119,19 +91,6 @@ class DensityConfig:
     # 0 disables.
     temporal_split_threshold: float = 0.0
     temporal_split_offset_sigmas: float = 1.0
-    # #8.1 floater multi-view consensus pruning: drop Gaussians active in
-    # fewer than `floater_min_views` distinct accumulate() calls within the
-    # current density-control window. Activity = grad_norm > floater_eps.
-    # 0 disables.
-    floater_min_views: int = 0
-    floater_eps: float = 1e-3
-    # μ_t out-of-bounds prune (trigger_audit Bug C): drop Gaussians whose
-    # time-mean is outside the scene's [mu_t_min, mu_t_max] domain. NeRFies
-    # normalizes t to [0, 1]; defaults pad ±0.05 to avoid pruning Gaussians
-    # at the boundary that are actively contributing to t∈[0, 1].
-    # ±1e10 = effectively disabled.
-    mu_t_min: float = -1e10
-    mu_t_max: float = 1e10
 
 
 class DensityTracker:
@@ -302,17 +261,11 @@ class DensityTracker:
     def prune(self, config: DensityConfig) -> int:
         with torch.no_grad():
             opacity = torch.sigmoid(self.model.opacity_logit)
-            _, _, lam_min, lam_max = self._sigma_3d_eigs(post_schur=config.trigger_post_schur)
+            _, _, lam_min, lam_max = self._sigma_3d_eigs()
             low_op_mask = opacity < config.opacity_threshold
             collapsed_mask = lam_min < config.scale_min
             runaway_mask = lam_max > config.scale_max
             drop_mask = low_op_mask | collapsed_mask | runaway_mask
-            # Bug C: μ_t out-of-bounds prune (default disabled via ±1e10 sentinels).
-            if config.mu_t_min > -1e9 or config.mu_t_max < 1e9:
-                mu_t = self.model.mu.data[..., 0] if self.model.mu is not None \
-                       else self.model.mu_time.data.squeeze(-1)
-                oob_mask = (mu_t < config.mu_t_min) | (mu_t > config.mu_t_max)
-                drop_mask = drop_mask | oob_mask
             # RCA diagnostic: opacity distribution (cheap, ~1 ms per call).
             qs = torch.quantile(
                 opacity,
@@ -327,14 +280,6 @@ class DensityTracker:
                 f"{qs[0]:.4f}/{qs[1]:.4f}/{qs[2]:.4f}/{qs[3]:.4f}/{qs[4]:.4f} "
                 f"| low_op={n_low} collapsed={n_col} runaway={n_run}"
             )
-            # #8.1 floater multi-view consensus pruning.
-            if config.floater_min_views > 0:
-                # Only prune Gaussians that have actually been seen this window
-                # (grad_counts > 0); zero-count Gaussians are not floaters,
-                # they're just unsampled.
-                seen = self.grad_counts > 0
-                floaters = seen & (self.active_counts < config.floater_min_views)
-                drop_mask = drop_mask | floaters
             keep_mask = ~drop_mask
             n_kept = int(keep_mask.sum().item())
             n_pruned = int(drop_mask.sum().item())
@@ -358,28 +303,13 @@ class DensityTracker:
         """Split stressed + spatially-large Gaussians along their major Σ_3D axis."""
         grads = self.mean_grad()
         with torch.no_grad():
-            Sigma_3D, _, _, lam_max = self._sigma_3d_eigs(post_schur=config.trigger_post_schur)
+            Sigma_3D, _, _, lam_max = self._sigma_3d_eigs()
             stressed = grads > config.grad_threshold
             big = lam_max > config.spatial_split_threshold
             split_mask = stressed & big
-            if config.aspect_split_threshold > 0.0:
-                # H1: geometric-only anisotropy split. Use middle eigenvalue
-                # (which post_schur would call λ_mid_inplane; pre-schur it is
-                # the middle of rank-3 Σ_3D). λ_max/λ_mid is the aspect.
-                _, eigs_full, _, _ = self._sigma_3d_eigs(post_schur=config.trigger_post_schur)
-                aspect = eigs_full[:, 2] / eigs_full[:, 1].clamp_min(1e-12)
-                aniso_mask = aspect > config.aspect_split_threshold
-                split_mask = split_mask | aniso_mask
             n_split = int(split_mask.sum().item())
             if n_split == 0:
                 return 0
-            if config.max_split_per_event > 0 and n_split > config.max_split_per_event:
-                # Cap: keep top-k by accumulated grad among the eligible set.
-                eligible_grads = torch.where(split_mask, grads, torch.full_like(grads, -1.0))
-                topk = torch.topk(eligible_grads, config.max_split_per_event).indices
-                split_mask = torch.zeros_like(split_mask)
-                split_mask[topk] = True
-                n_split = int(split_mask.sum().item())
 
             idx = torch.nonzero(split_mask, as_tuple=True)[0]
             phi = config.split_shrink_factor
@@ -431,24 +361,7 @@ class DensityTracker:
             else:
                 L_raw_par = L_raw_old / phi
 
-            op_par_raw = self.model.opacity_logit.data[idx]
-            if config.split_opacity_correction:
-                # Bug H: Kheradmand 1→2 alpha-preserving opacity split.
-                # o_child = 1 − √(1 − o_parent), so blending two children at
-                # the same depth recovers o_parent.
-                o_parent = torch.sigmoid(op_par_raw).clamp(1e-6, 1.0 - 1e-6)
-                o_child = (1.0 - (1.0 - o_parent).sqrt()).clamp(1e-6, 1.0 - 1e-6)
-                op_par = torch.log(o_child / (1.0 - o_child))
-            elif config.split_opacity_brighter:
-                # Bug H-inv: opposite direction — boost children to compensate
-                # for smaller per-Gaussian screen-space coverage post-shrink.
-                # o_child = √(o_parent): parent 0.5 → child 0.71; parent 0.9 → 0.95.
-                o_parent = torch.sigmoid(op_par_raw).clamp(1e-6, 1.0 - 1e-6)
-                o_child = o_parent.sqrt().clamp(1e-6, 1.0 - 1e-6)
-                op_par = torch.log(o_child / (1.0 - o_child))
-            else:
-                op_par = op_par_raw
-
+            op_par = self.model.opacity_logit.data[idx]
             new_rows: dict[str, Tensor] = {
                 "n_raw": torch.cat([n_raw_par, n_raw_par], dim=0),
                 "L_raw": torch.cat([L_raw_par, L_raw_par], dim=0),
@@ -491,12 +404,6 @@ class DensityTracker:
             n_split = int(split_mask.sum().item())
             if n_split == 0:
                 return 0
-            if config.max_split_per_event > 0 and n_split > config.max_split_per_event:
-                eligible = torch.where(split_mask, grads, torch.full_like(grads, -1.0))
-                topk = torch.topk(eligible, config.max_split_per_event).indices
-                split_mask = torch.zeros_like(split_mask)
-                split_mask[topk] = True
-                n_split = int(split_mask.sum().item())
 
             idx = torch.nonzero(split_mask, as_tuple=True)[0]
             phi = config.split_shrink_factor
@@ -530,18 +437,7 @@ class DensityTracker:
             else:
                 L_raw_par = L_raw_old / phi
 
-            op_par_raw = self.model.opacity_logit.data[idx]
-            if config.split_opacity_correction:
-                o_parent = torch.sigmoid(op_par_raw).clamp(1e-6, 1.0 - 1e-6)
-                o_child = (1.0 - (1.0 - o_parent).sqrt()).clamp(1e-6, 1.0 - 1e-6)
-                op_par = torch.log(o_child / (1.0 - o_child))
-            elif config.split_opacity_brighter:
-                o_parent = torch.sigmoid(op_par_raw).clamp(1e-6, 1.0 - 1e-6)
-                o_child = o_parent.sqrt().clamp(1e-6, 1.0 - 1e-6)
-                op_par = torch.log(o_child / (1.0 - o_child))
-            else:
-                op_par = op_par_raw
-
+            op_par = self.model.opacity_logit.data[idx]
             new_rows: dict[str, Tensor] = {
                 "n_raw": torch.cat([n_raw_par, n_raw_par], dim=0),
                 "L_raw": torch.cat([L_raw_par, L_raw_par], dim=0),
@@ -579,94 +475,14 @@ class DensityTracker:
                 continue
             t.index_fill_(0, idx, 0.0)
 
-    # --- Bug G: nearest-neighbor merge ------------------------------------
-
-    def merge(self, config: DensityConfig) -> int:
-        """Drop the lower-opacity member of any pair within merge_distance
-        whose normals satisfy |n^T n'| > merge_normal_cos; combine their
-        opacities on the survivor via o_new = 1 − (1−o_a)(1−o_b).
-
-        Pairwise distances are computed in chunks of 1024 to bound memory.
-        For N=50k this is ~50 × 1024 × 50k × 4B = 10 GB peak — too much for
-        L4. Chunk to 512 → 5 GB; 256 → 2.5 GB. Use 512.
-        """
-        if config.merge_distance <= 0.0:
-            return 0
-        with torch.no_grad():
-            N = int(self.model.N)
-            if N < 2:
-                return 0
-            mu_spatial = self.model.mu.data[..., 1:]                    # (N, 3)
-            n_norm = self.model.n_raw.data.norm(dim=-1, keepdim=True).clamp_min(1e-12)
-            n_unit = self.model.n_raw.data / n_norm                     # (N, 4)
-            opacity = torch.sigmoid(self.model.opacity_logit)           # (N,)
-            drop = torch.zeros(N, dtype=torch.bool, device=mu_spatial.device)
-
-            thr = config.merge_distance
-            cos_thr = config.merge_normal_cos
-            chunk = 512
-            arange_full = torch.arange(N, device=mu_spatial.device)
-            for start in range(0, N, chunk):
-                end = min(start + chunk, N)
-                chunk_mu = mu_spatial[start:end]                        # (c, 3)
-                chunk_n = n_unit[start:end]                             # (c, 4)
-                chunk_op = opacity[start:end]                           # (c,)
-                d = torch.cdist(chunk_mu, mu_spatial)                   # (c, N)
-                # mask self
-                row_idx = torch.arange(end - start, device=d.device)
-                col_idx = arange_full[start:end]
-                d[row_idx, col_idx] = float("inf")
-                # mask already-dropped
-                d[:, drop] = float("inf")
-                min_d, nn_idx = d.min(dim=1)                            # (c,)
-                # normal alignment
-                n_dot = (chunk_n * n_unit[nn_idx]).sum(-1).abs()        # (c,)
-                close = (min_d < thr) & (n_dot > cos_thr)
-                # absorb when chunk_op < nn_op AND survivor not already dropped
-                nn_op = opacity[nn_idx]
-                survivor_alive = ~drop[nn_idx]
-                absorb = close & (chunk_op < nn_op) & survivor_alive & ~drop[start:end]
-                ab_local = torch.nonzero(absorb, as_tuple=True)[0]
-                if ab_local.numel() == 0:
-                    continue
-                # Sequential application — small set, fine in Python.
-                for li in ab_local.tolist():
-                    gi = start + li
-                    tgt = int(nn_idx[li].item())
-                    if drop[tgt]:
-                        continue
-                    o_src = float(opacity[gi].item())
-                    o_dst = float(opacity[tgt].item())
-                    o_new = 1.0 - (1.0 - o_src) * (1.0 - o_dst)
-                    o_new = min(max(o_new, 1e-6), 1.0 - 1e-6)
-                    self.model.opacity_logit.data[tgt] = torch.log(
-                        torch.tensor(o_new / (1.0 - o_new),
-                                     dtype=self.model.opacity_logit.dtype,
-                                     device=self.model.opacity_logit.device)
-                    )
-                    drop[gi] = True
-
-            n_merged = int(drop.sum().item())
-        if n_merged > 0:
-            self._keep_rows(~drop)
-        return n_merged
-
-    # ----------------------------------------------------------------------
-
     def densify_and_prune(self, config: DensityConfig) -> dict:
-        """Apply the density-control pass: split + temporal_split + prune
-        (+ optional nearest-neighbor merge). Returns stats dict.
+        """Apply the density-control pass: split + temporal_split + prune.
+        Returns stats dict.
         """
         n_split = self.split(config)
         n_tsplit = self.temporal_split(config)
         n_pruned = self.prune(config)
-        n_merged = 0
         self._density_call_count += 1
-        if (config.merge_every > 0
-                and config.merge_distance > 0.0
-                and self._density_call_count % config.merge_every == 0):
-            n_merged = self.merge(config)
         self.reset()
         return {"split": n_split, "tsplit": n_tsplit,
-                "pruned": n_pruned, "merged": n_merged,
-                "final_N": self.model.N}
+                "pruned": n_pruned, "final_N": self.model.N}

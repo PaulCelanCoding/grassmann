@@ -65,16 +65,12 @@ class TrainableGaussians(nn.Module):
         device: str = "cpu",
         learn_sigma_k_pixel: bool = False,
         sh_degree: int = 0,
-        mu_constraint: str = "free",
         mu_lr_split: bool = False,
         clamp_mode: str = "hard",
         eps_schur: float = 1e-20,
     ):
         super().__init__()
         self.sh_degree = int(sh_degree)
-        self.mu_constraint = str(mu_constraint)
-        if self.mu_constraint not in ("free", "project", "reparam", "penalty"):
-            raise ValueError(f"Unknown mu_constraint={self.mu_constraint!r}")
         self.mu_lr_split = bool(mu_lr_split)
         self.clamp_mode = str(clamp_mode)
         if self.clamp_mode not in ("hard", "soft"):
@@ -129,17 +125,10 @@ class TrainableGaussians(nn.Module):
         n_unit = self.n_raw / n_norm
         opacity = torch.sigmoid(self.opacity_logit)
 
-        # μ-DOF probe: "reparam" projects mu upstream of compute_derived so
-        # that any params.mu consumer sees the post-projected value.
         if self.mu_lr_split:
-            mu_raw = torch.cat([self.mu_time, self.mu_spatial], dim=-1)      # (N, 4)
+            mu_eff = torch.cat([self.mu_time, self.mu_spatial], dim=-1)      # (N, 4)
         else:
-            mu_raw = self.mu
-        if self.mu_constraint == "reparam":
-            n_dot_mu = (n_unit * mu_raw).sum(-1, keepdim=True)
-            mu_eff = mu_raw - n_dot_mu * n_unit
-        else:
-            mu_eff = mu_raw
+            mu_eff = self.mu
 
         sh: torch.Tensor | None
         if self.sh_degree == 0:
@@ -166,7 +155,6 @@ class TrainableGaussians(nn.Module):
             sigma_k_temporal=float(self.sigma_k_temporal_param.item()),
             sh=sh,
             sh_degree=self.sh_degree,
-            mu_constraint=self.mu_constraint,
             clamp_mode=self.clamp_mode,
             eps_schur=self.eps_schur,
         )
@@ -216,7 +204,6 @@ def trainable_from_params(
     device: str = "cpu",
     learn_sigma_k_pixel: bool = False,
     sh_degree: int = 0,
-    mu_constraint: str = "free",
     mu_lr_split: bool = False,
     clamp_mode: str = "hard",
     eps_schur: float = 1e-20,
@@ -226,7 +213,6 @@ def trainable_from_params(
         params, dtype=dtype, device=device,
         learn_sigma_k_pixel=learn_sigma_k_pixel,
         sh_degree=sh_degree,
-        mu_constraint=mu_constraint,
         mu_lr_split=mu_lr_split,
         clamp_mode=clamp_mode,
         eps_schur=eps_schur,
