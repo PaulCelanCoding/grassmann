@@ -116,7 +116,6 @@ def train(
     num_iters: int,
     image_scale: int,
     use_fast: bool,
-    init_strategy: str,
     split: str | None,
     allow_distortion: bool,
     log_every: int,
@@ -144,8 +143,6 @@ def train(
     lr_decay: float,
     lr_pos_scale: float,
     lambda_structural: float,
-    structural_kind: str,
-    clamp_mode: str,
     eps_schur: float,
     mu_lr_split: bool,
     lr_mu_spatial: float,
@@ -166,7 +163,7 @@ def train(
 ) -> None:
     scene_dir = _ensure_scene_unpacked(scene)
     suffix = f"-{run_tag}" if run_tag else ""
-    out_dir = f"/checkpoints/{dataset}-{scene}-{init_strategy}-{num_iters}it{suffix}"
+    out_dir = f"/checkpoints/{dataset}-{scene}-{num_iters}it{suffix}"
     argv = [
         "python", "scripts/train_mono.py",
         "--dataset", dataset,
@@ -175,7 +172,6 @@ def train(
         "--num_iters", str(num_iters),
         "--log_every", str(log_every),
         "--image_scale", str(image_scale),
-        "--init_strategy", init_strategy,
         "--sigma_3d_blur", str(sigma_3d_blur),
         "--sigma_init_sq", str(sigma_init_sq),
     ]
@@ -219,11 +215,7 @@ def train(
         argv += ["--lr_pos_scale", str(lr_pos_scale)]
     if lambda_structural != 0.2:
         argv += ["--lambda_structural", str(lambda_structural)]
-    if structural_kind != "boxstats":
-        argv += ["--structural_kind", structural_kind]
-    if clamp_mode != "hard":
-        argv += ["--clamp_mode", clamp_mode]
-    if eps_schur > 0:
+    if eps_schur != 1e-8:
         argv += ["--eps_schur", str(eps_schur)]
     if mu_lr_split:
         argv += ["--mu_lr_split",
@@ -343,7 +335,6 @@ def main(
     scene: str = "slice-banana",
     iters: int = 500,
     log_every: int = 50,
-    init_strategy: str = "random",
     split: str = "",
     allow_distortion: bool = True,
     ckpt: str = "",
@@ -374,9 +365,7 @@ def main(
     lr_decay: float = 1.0,
     lr_pos_scale: float = 1.0,
     lambda_structural: float = 0.2,
-    structural_kind: str = "boxstats",
-    clamp_mode: str = "hard",
-    eps_schur: float = -1.0,
+    eps_schur: float = 1e-8,
     mu_lr_split: bool = False,
     lr_mu_spatial: float = 1e-4,
     lr_mu_time: float = 1e-3,
@@ -406,7 +395,7 @@ def main(
         train.remote(
             dataset=dataset, scene=scene,
             num_iters=iters, image_scale=4, use_fast=True,
-            init_strategy=init_strategy, split=split_arg,
+            split=split_arg,
             allow_distortion=allow_distortion,
             log_every=log_every,
             sigma_3d_blur=sigma_3d_blur,
@@ -433,8 +422,6 @@ def main(
             lr_decay=lr_decay,
             lr_pos_scale=lr_pos_scale,
             lambda_structural=lambda_structural,
-            structural_kind=structural_kind,
-            clamp_mode=clamp_mode,
             eps_schur=eps_schur,
             mu_lr_split=mu_lr_split,
             lr_mu_spatial=lr_mu_spatial,
@@ -458,7 +445,7 @@ def main(
             dataset=dataset, scene=scene,
             num_iters=iters if iters != 500 else 30000,
             image_scale=2, use_fast=True,
-            init_strategy=init_strategy, split=split_arg,
+            split=split_arg,
             allow_distortion=allow_distortion,
             log_every=log_every if log_every != 50 else 200,
             sigma_3d_blur=sigma_3d_blur,
@@ -485,8 +472,6 @@ def main(
             lr_decay=lr_decay,
             lr_pos_scale=lr_pos_scale,
             lambda_structural=lambda_structural,
-            structural_kind=structural_kind,
-            clamp_mode=clamp_mode,
             eps_schur=eps_schur,
             mu_lr_split=mu_lr_split,
             lr_mu_spatial=lr_mu_spatial,

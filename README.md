@@ -58,11 +58,9 @@ python scripts/train_mono.py \
   --output_dir checkpoints/slice-banana \
   --num_iters 14000 \
   --image_scale 4 \
-  --init_strategy spatial_slice \
-  --clamp_mode soft \
   --sigma_init_sq 0.02 \
   --grassmann_relax_start 1000 --grassmann_relax_end 8000 \
-  --structural_kind ssim --lambda_structural 0.2 \
+  --lambda_structural 0.2 \
   --max_aspect_ratio 1000000 \
   --random_background \
   --sh_degree 3 \
@@ -79,15 +77,15 @@ python scripts/train_mono.py \
 
 Recipe highlights:
 
-- `--init_strategy spatial_slice` + `--clamp_mode soft`: start in the
-  static-3DGS regime and let n tilt into a dynamic disk via the
-  Prop 5.3 bridge of the v7 spec.
+- Init starts in the static-3DGS regime (n = e_0 spatial slice) and
+  lets n tilt into a dynamic disk via the Prop 5.3 soft-clamp bridge
+  of the v7 spec.
 - `--split_anisotropic_shrink`: on split, shrink L_raw only along the
   major axis. Avoids the cascading-small-Gaussian pathology of
   isotropic /φ shrink.
 - `--max_aspect_ratio 1000000`: effectively uncapped in-plane aspect.
-  `--structural_kind ssim`: 1-SSIM (DSSIM) structural loss. Together
-  these match the strongest mono baseline observed.
+  Structural loss is 1-SSIM (DSSIM). Together these match the
+  strongest mono baseline observed.
 
 Quality numbers from this recipe on slice-banana (14k iters, image
 scale 4): val PSNR around 24.5 dB, val LPIPS 0.41, walltime around

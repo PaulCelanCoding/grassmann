@@ -3,14 +3,10 @@ Loss functions for training the Grassmann model against video frames.
 
 We provide:
   - L1 loss (standard, robust).
-  - A lightweight "structural" loss based on local mean/variance matching,
-    playing the role of SSIM without external dependencies. This gives the
-    training signal beyond pixel-wise L1 (edges, blobs, gradients).
+  - 1 - SSIM (DSSIM), Gaussian-windowed, matching the 3DGS structural term.
   - Optional LPIPS wrapper (requires `pip install lpips` and a pretrained
-    network download on first use). Used when available; otherwise falls
-    back to the structural loss.
-  - Optional temporal LPIPS (equivalent to LPIPS on frame-differences),
-    matching the video_lpips / temporal_lpips pattern in the Grassmann paper §3.4.
+    network download on first use).
+  - L1 on frame-differences for matching motion.
 
 All losses take images shaped (H, W, 3) or (B, H, W, 3) and return a scalar.
 Values are assumed to be in [0, 1].
@@ -96,35 +92,6 @@ def ssim_loss(rendered: Tensor, target: Tensor, window: int = 11, sigma: float =
     return 1.0 - ssim_map.mean()
 
 
-def structural_loss(rendered: Tensor, target: Tensor, window: int = 7) -> Tensor:
-    """Local-mean + local-variance matching, averaged over channels.
-
-    For each image we compute a box-filter local mean mu and variance sigma^2
-    at every pixel (reflection padding). The loss is
-        |mu_rendered - mu_target|  +  |sigma_rendered^2 - sigma_target^2|
-    averaged over pixels and channels. This captures local brightness and
-    texture mismatch without requiring LPIPS-style pretrained features.
-    """
-    r = _to_bchw(rendered)
-    t = _to_bchw(target)
-    pad = window // 2
-    kernel = torch.ones(3, 1, window, window, dtype=r.dtype, device=r.device) / (window * window)
-
-    def local_stats(x: Tensor) -> tuple[Tensor, Tensor]:
-        # Use groups=3 so each channel gets its own spatial average.
-        x_pad = F.pad(x, (pad, pad, pad, pad), mode="reflect")
-        mu = F.conv2d(x_pad, kernel, groups=3)
-        mu2 = F.conv2d(x_pad * x_pad, kernel[:, :1].expand(3, 1, window, window), groups=3)
-        sigma_sq = (mu2 - mu * mu).clamp_min(0.0)
-        return mu, sigma_sq
-
-    mu_r, var_r = local_stats(r)
-    mu_t, var_t = local_stats(t)
-    mean_err = (mu_r - mu_t).abs().mean()
-    var_err = (var_r - var_t).abs().mean()
-    return mean_err + var_err
-
-
 # ---- Optional LPIPS ---------------------------------------------------------
 
 class LPIPSLoss:
@@ -183,24 +150,16 @@ def photometric_loss(
     *,
     lambda_l1: float = 0.8,
     lambda_structural: float = 0.2,
-    structural_kind: str = "boxstats",
     lpips_fn: Optional[LPIPSLoss] = None,
     lambda_lpips: float = 0.0,
 ) -> Tensor:
-    """Weighted sum of L1 + structural + optional LPIPS.
+    """Weighted sum of L1 + (1 - SSIM) + optional LPIPS.
 
     rendered, target: (H, W, 3) or (B, H, W, 3) in [0, 1].
-    structural_kind: 'boxstats' (legacy 7x7 local-mean+var) or 'ssim'
-        (1 - SSIM, Gaussian-windowed, matches 3DGS).
     """
     loss = lambda_l1 * l1_loss(rendered, target)
     if lambda_structural > 0:
-        if structural_kind == "ssim":
-            loss = loss + lambda_structural * ssim_loss(rendered, target)
-        elif structural_kind == "boxstats":
-            loss = loss + lambda_structural * structural_loss(rendered, target)
-        else:
-            raise ValueError(f"unknown structural_kind: {structural_kind!r}")
+        loss = loss + lambda_structural * ssim_loss(rendered, target)
     if lpips_fn is not None and lambda_lpips > 0:
         loss = loss + lambda_lpips * lpips_fn(rendered, target)
     return loss

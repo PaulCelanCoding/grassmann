@@ -147,10 +147,6 @@ class TrainerConfig:
     # regime before n is allowed to tilt. 0/0 disables.
     grassmann_relax_start: int = 0
     grassmann_relax_end: int = 0
-    # Structural-loss kind: 'boxstats' (legacy 7x7 local-mean+var matcher) or
-    # 'ssim' (1 - SSIM Gaussian-windowed, matches 3DGS DSSIM term). Only
-    # active when lambda_structural > 0.
-    structural_kind: str = "boxstats"
     # Profiling: when True, train_step + train() bracket each phase with
     # CUDA-synced perf_counter() and dump per-phase ms/iter at log_every.
     # First profile_warmup_iters iters are discarded (JIT, allocator warmup).
@@ -326,7 +322,6 @@ class Trainer:
                 rendered, target,
                 lambda_l1=self.config.lambda_l1,
                 lambda_structural=self.config.lambda_structural,
-                structural_kind=self.config.structural_kind,
                 lpips_fn=self.lpips_fn,
                 lambda_lpips=self.config.lambda_lpips,
             )

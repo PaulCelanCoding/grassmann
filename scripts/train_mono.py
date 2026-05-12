@@ -67,14 +67,6 @@ def main():
     ap.add_argument("--image_scale", type=int, default=4)
     ap.add_argument("--split", type=str, default=None,
                     help="DyCheck split name (e.g. 'train', 'common'). Ignored for nerfies.")
-    ap.add_argument("--init_strategy",
-                    choices=("random", "spatial_slice"),
-                    default="random",
-                    help="'random': n ~ Uniform(S^3), L_raw small isotropic. "
-                         "'spatial_slice' (v7-doc Sec. 7.2): n = e_0 for every "
-                         "Gaussian, starting in the static-3DGS regime; tilts "
-                         "emerge during training via the bridge of Prop 5.3 "
-                         "(requires --clamp_mode=soft).")
     ap.add_argument("--num_iters", type=int, default=5000)
     ap.add_argument("--log_every", type=int, default=200)
     ap.add_argument("--use_fast_rasterizer", action="store_true")
@@ -167,25 +159,12 @@ def main():
                          "defaults (1e-3, 5e-3, 5e-3). 0.2 -> 5x smaller; closer to "
                          "D3DGS position_lr_init magnitude. Color/opacity LRs unaffected.")
     ap.add_argument("--lambda_structural", type=float, default=0.2,
-                    help="Weight on the structural loss (local-mean + local-variance "
-                         "matching with a 7x7 box filter, see grassmann.losses). 0.2 "
-                         "matches the historical L1=0.8/structural=0.2 split. 0.0 -> "
-                         "pure L1.")
-    ap.add_argument("--structural_kind", choices=("boxstats", "ssim"),
-                    default="boxstats",
-                    help="Choice of structural-loss term. 'boxstats' is the legacy "
-                         "7x7 local-mean+var matcher (default, historical). 'ssim' is "
-                         "1 - SSIM with a Gaussian window — matches the 3DGS DSSIM "
-                         "structural term.")
-    ap.add_argument("--clamp_mode", choices=("hard", "soft"), default="hard",
-                    help="v7-doc §5.1 Schur denominator clamp. 'hard' (legacy): "
-                         "max(Σ_tt, eps), discontinuous gradient. 'soft' (v7-doc): "
-                         "√(Σ_tt² + eps²), C^∞-smooth — required for the n=e_0 "
-                         "init bridge of Prop 5.3.")
-    ap.add_argument("--eps_schur", type=float, default=-1.0,
-                    help="Schur denominator floor. -1 (default) auto-selects: "
-                         "1e-20 for clamp_mode=hard, 1e-8 for clamp_mode=soft "
-                         "(v7-doc default). Override with explicit value if needed.")
+                    help="Weight on the 1 - SSIM (DSSIM) structural loss. 0.2 "
+                         "matches the historical L1=0.8/structural=0.2 split. "
+                         "0.0 -> pure L1.")
+    ap.add_argument("--eps_schur", type=float, default=1e-8,
+                    help="Schur denominator floor. v7-doc Prop 5.3 soft clamp: "
+                         "√(Σ_tt² + eps²). Default 1e-8.")
     ap.add_argument("--mu_lr_split", action="store_true",
                     help="v7-doc §7.5: split μ into mu_time and mu_spatial as "
                          "two parameters with separate LRs (--lr_mu_time / "
@@ -221,8 +200,7 @@ def main():
                          "Stressed Gaussians with Σ_tt > thr are split along "
                          "the time axis (μ_t shifted ±N·sqrt(Σ_tt)). 0 disables.")
     ap.add_argument("--grassmann_relax_start", type=int, default=0,
-                    help="Iter when lr_n starts ramping from 0 → base. "
-                         "Use with --init_strategy spatial_slice.")
+                    help="Iter when lr_n starts ramping from 0 → base.")
     ap.add_argument("--grassmann_relax_end", type=int, default=0,
                     help="Iter when lr_n reaches base. 0 disables.")
     ap.add_argument("--mip_filter_sigma_pixel", type=float, default=0.0,
@@ -355,14 +333,13 @@ def main():
         print(f"  [init_points_multiplier={K}] cloud replicated: "
               f"N={points.shape[0]} (was {ds.N_points}), perturb scale={noise_scale:.4f}")
 
-    print(f"  Initializing {points.shape[0]} Gaussians (strategy={args.init_strategy})...")
+    print(f"  Initializing {points.shape[0]} Gaussians (spatial_slice)...")
 
     sigma_init_arg: float = args.sigma_init_sq
     params = init_gaussians_from_points(
         points,
         times_used,
         ds.cameras_per_frame,
-        strategy=args.init_strategy,
         observability=obs_used,
         colors=colors_override,
         sigma_init_sq=sigma_init_arg,
@@ -371,15 +348,10 @@ def main():
         sigma_k_temporal=0.0,
         seed=args.seed,
     )
-    eps_schur_resolved = (
-        args.eps_schur if args.eps_schur > 0
-        else (1e-8 if args.clamp_mode == "soft" else 1e-20)
-    )
     model = trainable_from_params(
         params, dtype=DTYPE, device=device, sh_degree=args.sh_degree,
         mu_lr_split=args.mu_lr_split,
-        clamp_mode=args.clamp_mode,
-        eps_schur=eps_schur_resolved,
+        eps_schur=args.eps_schur,
     )
     if args.sh_degree > 0:
         print(f"  Model: {model.N} Gaussians on {device} (SH degree {args.sh_degree}, "
@@ -392,7 +364,6 @@ def main():
         log_every=args.log_every,
         lambda_l1=0.8,
         lambda_structural=args.lambda_structural,
-        structural_kind=args.structural_kind,
         lr_n=1e-3 * args.lr_pos_scale,
         lr_mu=5e-3 * args.lr_pos_scale,
         lr_L=5e-3 * args.lr_pos_scale,
@@ -445,11 +416,10 @@ def main():
 
     out_dir = args.output_dir or args.scene_dir
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"trained_{args.dataset}_{args.init_strategy}.pt"
+    out_path = out_dir / f"trained_{args.dataset}.pt"
     torch.save({
         "model_state_dict": model.state_dict(),
         "history": history,
-        "init_strategy": args.init_strategy,
         "dataset": args.dataset,
     }, out_path)
     print(f"Saved checkpoint to {out_path}")

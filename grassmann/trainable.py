@@ -66,15 +66,11 @@ class TrainableGaussians(nn.Module):
         learn_sigma_k_pixel: bool = False,
         sh_degree: int = 0,
         mu_lr_split: bool = False,
-        clamp_mode: str = "hard",
-        eps_schur: float = 1e-20,
+        eps_schur: float = 1e-8,
     ):
         super().__init__()
         self.sh_degree = int(sh_degree)
         self.mu_lr_split = bool(mu_lr_split)
-        self.clamp_mode = str(clamp_mode)
-        if self.clamp_mode not in ("hard", "soft"):
-            raise ValueError(f"Unknown clamp_mode={self.clamp_mode!r}")
         self.eps_schur = float(eps_schur)
         self.n_raw = nn.Parameter(params.n.to(dtype=dtype, device=device))
         self.L_raw = nn.Parameter(params.L_raw.to(dtype=dtype, device=device))
@@ -156,7 +152,6 @@ class TrainableGaussians(nn.Module):
             sigma_k_temporal=float(self.sigma_k_temporal_param.item()),
             sh=sh,
             sh_degree=self.sh_degree,
-            clamp_mode=self.clamp_mode,
             eps_schur=self.eps_schur,
         )
 
@@ -206,8 +201,7 @@ def trainable_from_params(
     learn_sigma_k_pixel: bool = False,
     sh_degree: int = 0,
     mu_lr_split: bool = False,
-    clamp_mode: str = "hard",
-    eps_schur: float = 1e-20,
+    eps_schur: float = 1e-8,
 ) -> TrainableGaussians:
     """Convenience constructor."""
     return TrainableGaussians(
@@ -215,7 +209,6 @@ def trainable_from_params(
         learn_sigma_k_pixel=learn_sigma_k_pixel,
         sh_degree=sh_degree,
         mu_lr_split=mu_lr_split,
-        clamp_mode=clamp_mode,
         eps_schur=eps_schur,
     )
 

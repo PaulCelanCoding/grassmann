@@ -122,13 +122,10 @@ class GaussianParams:
     sigma_k_temporal: float = 0.0
     sh: Optional[Tensor] = None     # (N, K, 3) where K=(sh_degree+1)^2; None at sh_degree=0
     sh_degree: int = 0              # 0 → use color; >0 → use sh
-    # v7-doc §5.1 soft-clamp probe: how to floor the temporal-axis denominators
-    # in the Schur step + w_t. "hard" (default, legacy): max(Σ_tt, eps_schur)
-    # via clamp_min, eps_schur=1e-20. "soft" (v7-doc Prop 5.3): replace Σ_tt
-    # with √(Σ_tt² + eps_schur²), eps_schur=1e-8. The soft-clamp is what
-    # makes the n=e_0 → tilted-disk transition C^∞-smooth at θ ~ √eps_schur.
-    clamp_mode: str = "hard"        # "hard" | "soft"
-    eps_schur: float = 1e-20        # default 1e-20 for hard; pass 1e-8 for soft
+    # v7-doc §5.1 / Prop 5.3 soft clamp on the temporal-axis denominators in
+    # the Schur step + w_t: replace Σ_tt with √(Σ_tt² + eps²). Makes the
+    # n=e_0 → tilted-disk transition C^∞-smooth at θ ~ √eps.
+    eps_schur: float = 1e-8
 
     @property
     def N(self) -> int:
@@ -271,15 +268,11 @@ def condition_on_time(
     dt = t_0 - derived.v_0                                      # (N,)
 
     sigma_tt_pure = getattr(derived, "_sigma_tt_pure", derived.Sigma_tt)
-    # v7-doc §5.1 clamp: hard = max(x, eps); soft = √(x² + eps²).
+    # v7-doc §5.1 / Prop 5.3 soft clamp: √(x² + ε²) — bounded below by ε,
+    # smooth in x, identical to x for x ≫ ε.
     eps = float(params.eps_schur)
-    if params.clamp_mode == "soft":
-        # √(x² + ε²) ≥ ε always, smooth in x, identical to x for x ≫ ε.
-        Stt_pure_safe = torch.sqrt(sigma_tt_pure ** 2 + eps ** 2)
-        Stt_blur_safe = torch.sqrt(derived.Sigma_tt ** 2 + eps ** 2)
-    else:                                                        # "hard"
-        Stt_pure_safe = sigma_tt_pure.clamp_min(eps)
-        Stt_blur_safe = derived.Sigma_tt.clamp_min(eps)
+    Stt_pure_safe = torch.sqrt(sigma_tt_pure ** 2 + eps ** 2)
+    Stt_blur_safe = torch.sqrt(derived.Sigma_tt ** 2 + eps ** 2)
     inv_Stt_pure = 1.0 / Stt_pure_safe                           # (N,)
 
     shift = (dt * inv_Stt_pure).unsqueeze(-1) * derived.c_world  # (N, 3)
