@@ -195,10 +195,6 @@ def train(
     merge_distance: float,
     merge_normal_cos: float,
     aspect_split_threshold: float,
-    use_quadratic_motion: bool,
-    lr_c2: float,
-    use_s3_motion: bool,
-    lr_omega: float,
     profile_breakdown: bool,
     profile_warmup_iters: int,
 ) -> None:
@@ -341,10 +337,6 @@ def train(
                  "--merge_normal_cos", str(merge_normal_cos)]
     if aspect_split_threshold > 0:
         argv += ["--aspect_split_threshold", str(aspect_split_threshold)]
-    if use_quadratic_motion:
-        argv += ["--use_quadratic_motion", "--lr_c2", str(lr_c2)]
-    if use_s3_motion:
-        argv += ["--use_s3_motion", "--lr_omega", str(lr_omega)]
     if profile_breakdown:
         argv += ["--profile_breakdown",
                  "--profile_warmup_iters", str(profile_warmup_iters)]
@@ -518,10 +510,6 @@ def main(
     merge_distance: float = 0.0,
     merge_normal_cos: float = 0.95,
     aspect_split_threshold: float = 0.0,
-    use_quadratic_motion: bool = False,
-    lr_c2: float = 5e-4,
-    use_s3_motion: bool = False,
-    lr_omega: float = 5e-4,
     profile_breakdown: bool = False,
     profile_warmup_iters: int = 200,
 ):
@@ -612,10 +600,6 @@ def main(
             merge_distance=merge_distance,
             merge_normal_cos=merge_normal_cos,
             aspect_split_threshold=aspect_split_threshold,
-            use_quadratic_motion=use_quadratic_motion,
-            lr_c2=lr_c2,
-            use_s3_motion=use_s3_motion,
-            lr_omega=lr_omega,
             profile_breakdown=profile_breakdown,
             profile_warmup_iters=profile_warmup_iters,
         )
@@ -699,10 +683,6 @@ def main(
             merge_distance=merge_distance,
             merge_normal_cos=merge_normal_cos,
             aspect_split_threshold=aspect_split_threshold,
-            use_quadratic_motion=use_quadratic_motion,
-            lr_c2=lr_c2,
-            use_s3_motion=use_s3_motion,
-            lr_omega=lr_omega,
             profile_breakdown=profile_breakdown,
             profile_warmup_iters=profile_warmup_iters,
         )

@@ -145,13 +145,6 @@ class GaussianParams:
     # makes the n=e_0 → tilted-disk transition C^∞-smooth at θ ~ √eps_schur.
     clamp_mode: str = "hard"        # "hard" | "soft"
     eps_schur: float = 1e-20        # default 1e-20 for hard; pass 1e-8 for soft
-    # Quadratic centroid motion (optional): V_3D(t) = V_k + dt·c_world/σ_tt + dt²·c2.
-    # When None or the c2 tensor is all-zero, motion stays linear (legacy).
-    c2: Optional[Tensor] = None     # (N, 3) world-space quadratic coefficient
-    # S³ geodesic motion (optional): per-Gaussian angular-velocity ω ∈ R^3 (axis-angle/sec)
-    # at the reference frame v_0. R(dt) = exp(dt·ω̂) rotates V_k and the spatial
-    # 3-subblock of n; Σ_3D is conjugated by R. Zero-init → identity → legacy.
-    omega: Optional[Tensor] = None  # (N, 3) angular velocity
 
     @property
     def N(self) -> int:
@@ -241,40 +234,6 @@ def compute_derived(params: GaussianParams) -> DerivedQuantities:
     return derived
 
 
-# ---- S³ geodesic helpers ---------------------------------------------------
-
-def _rodrigues(theta: Tensor) -> Tensor:
-    """Axis-angle (N, 3) → rotation matrix (N, 3, 3) via Rodrigues' formula.
-
-    R = I + (sin|θ|/|θ|)·θ̂_× + ((1−cos|θ|)/|θ|²)·θ̂_×²
-
-    Small-angle branch uses Taylor expansions
-      sin(x)/x      ≈ 1 − x²/6  + x⁴/120
-      (1−cos x)/x²  ≈ 1/2 − x²/24 + x⁴/720
-    to stay smooth and differentiable through |θ|=0.
-    """
-    # theta: (..., 3); build cross-product matrix K = θ_×
-    zero = torch.zeros_like(theta[..., 0])
-    K = torch.stack([
-        torch.stack([zero,           -theta[..., 2],  theta[..., 1]], dim=-1),
-        torch.stack([ theta[..., 2],  zero,          -theta[..., 0]], dim=-1),
-        torch.stack([-theta[..., 1],  theta[..., 0],  zero          ], dim=-1),
-    ], dim=-2)  # (..., 3, 3)
-    K2 = K @ K
-    angle_sq = (theta * theta).sum(-1)              # (...,)
-    angle = torch.sqrt(angle_sq.clamp_min(0.0) + 1e-30)  # avoid 0 grad on sqrt
-    # Use Taylor for very small angles (where divide-by-angle is unstable).
-    small = angle_sq < 1e-8
-    sinc = torch.where(small,
-                       1.0 - angle_sq / 6.0 + angle_sq * angle_sq / 120.0,
-                       torch.sin(angle) / angle)
-    one_m_cos_over_sq = torch.where(small,
-                                    0.5 - angle_sq / 24.0 + angle_sq * angle_sq / 720.0,
-                                    (1.0 - torch.cos(angle)) / angle_sq.clamp_min(1e-30))
-    I = torch.eye(3, dtype=theta.dtype, device=theta.device).expand_as(K)
-    return I + sinc[..., None, None] * K + one_m_cos_over_sq[..., None, None] * K2
-
-
 # ---- Time conditioning (3D-lifted, per §9.1) -------------------------------
 
 @dataclass
@@ -347,27 +306,10 @@ def condition_on_time(
 
     shift = (dt * inv_Stt_pure).unsqueeze(-1) * derived.c_world  # (N, 3)
     V_3D_t = derived.V_k + shift                                 # (N, 3)
-    # Quadratic motion: V_3D(t) += dt² · c2.  Default off (c2 None or zero).
-    if getattr(params, "c2", None) is not None:
-        V_3D_t = V_3D_t + (dt * dt).unsqueeze(-1) * params.c2
 
     cw = derived.c_world                                         # (N, 3)
     outer = cw.unsqueeze(-1) * cw.unsqueeze(-2)                  # (N, 3, 3)
     Sigma_3D_t = derived.Sigma_3D - inv_Stt_pure.unsqueeze(-1).unsqueeze(-1) * outer
-
-    # S³ geodesic motion (opt-in): R(dt) ∈ SO(3) rotates the Schur shift around
-    # the Gaussian's own centroid V_k (object-local rotation) and conjugates Σ_3D.
-    # ω=0 ⇒ R=I ⇒ legacy. The c2 quadratic offset (if any) is preserved.
-    if getattr(params, "omega", None) is not None:
-        theta = dt.unsqueeze(-1) * params.omega                  # (N, 3)
-        R = _rodrigues(theta)                                    # (N, 3, 3)
-        # Rotate the Schur shift (object-local), keep V_k as anchor + preserve c2:
-        shift_rot = torch.einsum("nij,nj->ni", R, shift)
-        V_3D_t = derived.V_k + shift_rot
-        if getattr(params, "c2", None) is not None:
-            V_3D_t = V_3D_t + (dt * dt).unsqueeze(-1) * params.c2
-        # Conjugate Sigma_3D (post-Schur) by R:
-        Sigma_3D_t = R @ Sigma_3D_t @ R.transpose(-1, -2)
 
     inv_Stt_blur = 1.0 / Stt_blur_safe
     w_t = torch.exp(-0.5 * dt * dt * inv_Stt_blur)               # (N,)
