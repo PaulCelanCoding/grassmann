@@ -60,13 +60,11 @@ class _PhaseTimer:
             self.trainer._phase_counts.get(self.key, 0) + 1
         )
 
-from .gaussian import compute_derived, condition_on_time
 from .losses import l1_loss, mse_loss, photometric_loss, LPIPSLoss
 from .projection import Camera
-from .rasterizer import project_to_screen, rasterize
 from .trainable import TrainableGaussians, build_optimizer
 from .density_control import DensityTracker, DensityConfig
-from .fast_rasterizer import fast_rasterize, FastRasterConfig, is_available as fast_available
+from .fast_rasterizer import fast_rasterize, FastRasterConfig
 
 
 @dataclass
@@ -119,7 +117,6 @@ class TrainerConfig:
     densify_stop: int = 15000         # stop densification after this iteration
     density_config: Optional[DensityConfig] = None  # hyperparams; defaults built if None
     # Fast (CUDA) rasterizer
-    use_fast_rasterizer: bool = False  # True -> use CUDA diff-gaussian-rasterization if available
     fast_raster_config: Optional[FastRasterConfig] = None  # defaults built if None
     # Static baseline: disable time conditioning entirely (Schur step skipped,
     # w_t=1 always). Used to measure the "static-3DGS-on-monocular-bundle" floor
@@ -261,22 +258,13 @@ class Trainer:
         params = self.model.forward()
         bg_src = bg_override if bg_override is not None else self.config.background
         bg = bg_src.to(dtype=params.color.dtype, device=params.color.device)
-
-        if self.config.use_fast_rasterizer and fast_available() and params.n.is_cuda:
-            fc = self.config.fast_raster_config or FastRasterConfig()
-            return fast_rasterize(
-                params, t_value, self.cameras[cam_idx], self.H, self.W,
-                background=bg, config=fc,
-                static_baseline=self.config.static_baseline,
-                means2d_capture=means2d_capture,
-            )
-        # Fallback: toy rasterizer path (also used when no GPU or no extension).
-        if means2d_capture is not None:
-            means2d_capture.append(None)
-        derived = compute_derived(params)
-        tc = condition_on_time(params, derived, t_value, static=self.config.static_baseline)
-        sg = project_to_screen(params, tc, self.cameras[cam_idx])
-        return rasterize(sg, H=self.H, W=self.W, background=bg)
+        fc = self.config.fast_raster_config or FastRasterConfig()
+        return fast_rasterize(
+            params, t_value, self.cameras[cam_idx], self.H, self.W,
+            background=bg, config=fc,
+            static_baseline=self.config.static_baseline,
+            means2d_capture=means2d_capture,
+        )
 
     def train_step(self, iter_num: int = 0) -> tuple[float, float, float]:
         """One stochastic training step. Returns (total loss, L1, PSNR_dB)."""

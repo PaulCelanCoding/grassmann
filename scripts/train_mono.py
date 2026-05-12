@@ -69,7 +69,6 @@ def main():
                     help="DyCheck split name (e.g. 'train', 'common'). Ignored for nerfies.")
     ap.add_argument("--num_iters", type=int, default=5000)
     ap.add_argument("--log_every", type=int, default=200)
-    ap.add_argument("--use_fast_rasterizer", action="store_true")
     ap.add_argument("--sigma_3d_blur", type=float, default=1e-4,
                     help="Isotropic numerical lift (ε I) added to Σ_3D(t_0) before "
                          "feeding to the CUDA rasterizer. Σ_3D(t_0) is rank-2 under the "
@@ -223,12 +222,10 @@ def main():
                     help="Iters to discard before starting timing accumulation.")
     ap.add_argument("--sh_degree", type=int, default=0,
                     help="Spherical-harmonics band for per-Gaussian color. 0 keeps the "
-                         "legacy constant-RGB path (color_logit). >0 swaps in sh_dc + "
-                         "sh_rest with K=(degree+1)^2 coefficients/channel; the CUDA "
-                         "rasterizer evaluates SH against the per-Gaussian view direction. "
-                         "Standard 3DGS default is 3 (16 coeffs/channel). Requires "
-                         "--use_fast_rasterizer; the toy CPU rasterizer collapses to the "
-                         "DC term.")
+                         "constant-RGB path (color_logit). >0 swaps in sh_dc + sh_rest "
+                         "with K=(degree+1)^2 coefficients/channel; the CUDA rasterizer "
+                         "evaluates SH against the per-Gaussian view direction. "
+                         "Standard 3DGS default is 3 (16 coeffs/channel).")
     args = ap.parse_args()
 
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -385,7 +382,6 @@ def main():
             split_shrink_factor=args.split_shrink_factor,
             split_offset_sigmas=args.split_offset_sigmas,
         ),
-        use_fast_rasterizer=args.use_fast_rasterizer,
         fast_raster_config=FastRasterConfig(
             sigma_3d_blur=args.sigma_3d_blur,
             sh_degree=args.sh_degree,

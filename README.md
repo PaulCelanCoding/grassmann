@@ -71,8 +71,7 @@ python scripts/train_mono.py \
   --split_anisotropic_shrink \
   --temporal_split_threshold 0.1 \
   --lambda_frob 1e-4 \
-  --opacity_reset_every 3000 \
-  --use_fast_rasterizer
+  --opacity_reset_every 3000
 ```
 
 Recipe highlights:

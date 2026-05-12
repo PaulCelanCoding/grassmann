@@ -115,7 +115,6 @@ def train(
     scene: str,
     num_iters: int,
     image_scale: int,
-    use_fast: bool,
     split: str | None,
     allow_distortion: bool,
     log_every: int,
@@ -177,8 +176,6 @@ def train(
     ]
     if split is not None:
         argv += ["--split", split]
-    if use_fast:
-        argv.append("--use_fast_rasterizer")
     if allow_distortion:
         argv.append("--allow_distortion")
     if seed is not None:
@@ -394,7 +391,7 @@ def main(
     if cmd == "smoke":
         train.remote(
             dataset=dataset, scene=scene,
-            num_iters=iters, image_scale=4, use_fast=True,
+            num_iters=iters, image_scale=4,
             split=split_arg,
             allow_distortion=allow_distortion,
             log_every=log_every,
@@ -444,7 +441,7 @@ def main(
         train.remote(
             dataset=dataset, scene=scene,
             num_iters=iters if iters != 500 else 30000,
-            image_scale=2, use_fast=True,
+            image_scale=2,
             split=split_arg,
             allow_distortion=allow_distortion,
             log_every=log_every if log_every != 50 else 200,

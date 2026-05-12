@@ -11,8 +11,8 @@ Requirements:
   - `pip install git+https://github.com/graphdeco-inria/diff-gaussian-rasterization.git`
     (compiles a CUDA extension; requires CUDA toolkit + nvcc installed).
 
-If the package isn't available, `fast_rasterize()` falls back to our toy
-rasterizer automatically, so all tests and CPU runs still work.
+If the package isn't available, `fast_rasterize()` raises -- there is no
+CPU fallback. Install diff-gaussian-rasterization to render.
 
 The API we wrap:
 
@@ -50,7 +50,6 @@ from torch import Tensor
 
 from .gaussian import GaussianParams, compute_derived, condition_on_time
 from .projection import Camera
-from .rasterizer import project_to_screen, rasterize as toy_rasterize
 
 
 # ---- Availability check ---------------------------------------------------
@@ -200,13 +199,11 @@ def fast_rasterize(
     *,
     background: Optional[Tensor] = None,
     config: Optional[FastRasterConfig] = None,
-    force_fallback: bool = False,
     means2d_capture: Optional[list] = None,
     static_baseline: bool = False,
     sh_degree_override: Optional[int] = None,
 ) -> Tensor:
-    """Render the current model using the CUDA 3DGS rasterizer if available,
-    otherwise fall back to our toy rasterizer.
+    """Render the current model using the CUDA 3DGS rasterizer.
 
     params:     current Grassmann Gaussians.
     t_0:        time instant to render.
@@ -214,35 +211,35 @@ def fast_rasterize(
     H, W:       image dimensions.
     background: (3,) RGB background in [0, 1]. Defaults to black.
     config:     optional rasterizer settings.
-    force_fallback: if True, always use the toy rasterizer (useful for testing
-                    that the toy + fast paths agree).
     means2d_capture: if a list is passed, the means2D dummy tensor (with
                     requires_grad=True) is appended to it. After backward()
                     its .grad gives the screen-space mean gradient per Gaussian
                     — used by the screen-space density-control trigger.
-                    None entry is appended when the toy fallback path is taken.
 
     Returns: (H, W, 3) rendered image.
+
+    Raises RuntimeError if diff-gaussian-rasterization is not installed or
+    `params` is on CPU. There is no CPU fallback (AGENTS.md: fail fast
+    rather than hide a regression behind a green-but-degraded path).
     """
     if config is None:
         config = FastRasterConfig()
     if background is None:
         background = torch.zeros(3, dtype=params.n.dtype, device=params.n.device)
 
-    # Always compute the derived + time-conditioned quantities.
+    if not is_available():
+        raise RuntimeError(
+            "fast_rasterize requires CUDA + diff-gaussian-rasterization. "
+            "Install with: pip install git+https://github.com/graphdeco-inria/"
+            "diff-gaussian-rasterization.git"
+        )
+    if not params.n.is_cuda:
+        raise RuntimeError("fast_rasterize requires GaussianParams on a CUDA device.")
+
+    # Compute the derived + time-conditioned quantities.
     derived = compute_derived(params)
     tc = condition_on_time(params, derived, t_0, static=static_baseline)
 
-    use_fast = (not force_fallback) and is_available() and params.n.is_cuda
-
-    if not use_fast:
-        sg = project_to_screen(params, tc, cam)
-        bg = background.to(dtype=params.n.dtype, device=params.n.device)
-        if means2d_capture is not None:
-            means2d_capture.append(None)   # toy path has no means2D analog
-        return toy_rasterize(sg, H=H, W=W, background=bg)
-
-    # ---- Fast CUDA path ----
     assert _GaussianRasterizationSettings is not None
     assert _GaussianRasterizer is not None
 
