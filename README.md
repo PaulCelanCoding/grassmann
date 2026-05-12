@@ -133,9 +133,8 @@ pytest tests/ -q
 ```
 
 The active suite covers the surviving (3-plane G(3,4)) paths: numerical
-correctness of `compute_derived` / `condition_on_time`, the projection
-Jacobian against autograd, dataset loaders, and a numerical-cliff
-fuzzer for the Jacobian (`scripts/stress_test_jacobian.py`).
+correctness of `compute_derived` / `condition_on_time`, dataset loaders,
+and the quaternion + Grassmann primitives.
 
 ## Agent contributors
 
