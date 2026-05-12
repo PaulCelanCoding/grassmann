@@ -21,47 +21,6 @@ from .gaussian import GaussianParams
 DTYPE = torch.float64
 
 
-def init_gaussian_from_point(
-    X_world: Tensor,
-    t: float,
-    cameras: list[Camera],
-    *,
-    color: Optional[Tensor] = None,
-    sigma_init_sq: float = 0.02,
-    opacity: float = 0.5,
-    sigma_k_pixel: float = 1.0,
-    sigma_k_temporal: float = 0.0,
-    generator: Optional[torch.Generator] = None,
-) -> GaussianParams:
-    """Build a single 3-plane Grassmann Gaussian from a 3D point X_world at time t.
-
-    `cameras` is accepted for signature compatibility with the batched
-    `init_gaussians_from_points` and is otherwise unused.
-    """
-    if color is None:
-        color = torch.full((3,), 0.5, dtype=DTYPE)
-
-    n = torch.zeros(4, dtype=DTYPE)
-    n[0] = 1.0                                                       # n = e_0
-    sigma_L = (sigma_init_sq / 3.0) ** 0.5
-    L_raw = torch.randn(4, 3, dtype=DTYPE, generator=generator) * sigma_L
-
-    mu = torch.cat(
-        [torch.tensor([float(t)], dtype=DTYPE), X_world.to(dtype=DTYPE)],
-        dim=0,
-    )                                                                    # (4,)
-
-    return GaussianParams(
-        n=n.unsqueeze(0),
-        L_raw=L_raw.unsqueeze(0),
-        mu=mu.unsqueeze(0),
-        opacity=torch.tensor([opacity], dtype=DTYPE),
-        color=color.unsqueeze(0),
-        sigma_k_pixel=sigma_k_pixel,
-        sigma_k_temporal=sigma_k_temporal,
-    )
-
-
 def init_gaussians_from_points(
     points: Tensor,                                # (N, 3)
     times: Tensor,                                 # (N,)

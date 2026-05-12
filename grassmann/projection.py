@@ -90,33 +90,3 @@ def project_static(X_world: Tensor, cam: Camera) -> Tensor:
     Returns shape (..., 2).
     """
     return perspective(world_to_camera(X_world, cam), cam)
-
-
-# ---- Analytic Jacobian of perspective ---------------------------------------
-
-def perspective_jacobian(X_cam: Tensor, cam: Camera) -> Tensor:
-    """Analytic Jacobian d pi / d X_cam of the perspective projection.
-
-    For pi(X, Y, Z) = (fx X/Z + cx, fy Y/Z + cy):
-
-        J_pi = (1/Z) * [[ fx,  0, -fx X/Z ],
-                        [  0, fy, -fy Y/Z ]]
-
-    X_cam: shape (..., 3).
-    Returns shape (..., 2, 3).
-
-    This is equation (7) in the Jacobian paper.
-    """
-    X, Y, Z = X_cam[..., 0], X_cam[..., 1], X_cam[..., 2]
-    inv_Z = 1.0 / Z
-
-    # Build the 2x3 matrix for each batch entry.
-    zero = torch.zeros_like(X)
-    fx = torch.full_like(X, cam.fx)
-    fy = torch.full_like(X, cam.fy)
-
-    row0 = torch.stack([fx,              zero, -fx * X * inv_Z], dim=-1)  # (..., 3)
-    row1 = torch.stack([zero,            fy,   -fy * Y * inv_Z], dim=-1)  # (..., 3)
-
-    J = torch.stack([row0, row1], dim=-2)                                  # (..., 2, 3)
-    return J * inv_Z.unsqueeze(-1).unsqueeze(-1)

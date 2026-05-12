@@ -71,7 +71,6 @@ from .fast_rasterizer import fast_rasterize, FastRasterConfig
 class TrainerConfig:
     """Training hyperparameters."""
     num_iters: int = 2000
-    batch_size_views: int = 1       # cameras per step (1 = pure stochastic)
     log_every: int = 100
     renormalize_every: int = 1       # renormalize n_raw onto S^3 (cheap; do every step)
     lambda_l1: float = 0.8
@@ -135,9 +134,9 @@ class TrainerConfig:
     opacity_reset_every: int = 0
     opacity_reset_logit: float = -5.0
     # Progressive Grassmann relaxation: scale lr_n from 0 → base over
-    # [grassmann_relax_start, grassmann_relax_end]. Use with init_strategy=
-    # spatial_slice (n=e₀ at init) so the geometry settles in the static-3DGS
-    # regime before n is allowed to tilt. 0/0 disables.
+    # [grassmann_relax_start, grassmann_relax_end]. The init places n=e_0
+    # in the {t=0} spatial slice; this ramp keeps the geometry in the
+    # static-3DGS regime before n is allowed to tilt. 0/0 disables.
     grassmann_relax_start: int = 0
     grassmann_relax_end: int = 0
     # Profiling: when True, train_step + train() bracket each phase with

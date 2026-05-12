@@ -6,7 +6,6 @@ We provide:
   - 1 - SSIM (DSSIM), Gaussian-windowed, matching the 3DGS structural term.
   - Optional LPIPS wrapper (requires `pip install lpips` and a pretrained
     network download on first use).
-  - L1 on frame-differences for matching motion.
 
 All losses take images shaped (H, W, 3) or (B, H, W, 3) and return a scalar.
 Values are assumed to be in [0, 1].
@@ -32,16 +31,7 @@ def mse_loss(rendered: Tensor, target: Tensor) -> Tensor:
     return ((rendered - target) ** 2).mean()
 
 
-def psnr(rendered: Tensor, target: Tensor) -> Tensor:
-    """Peak signal-to-noise ratio in dB, assuming inputs in [0, 1] (max=1).
-
-    PSNR = 10 * log10(MAX^2 / MSE). Returns a scalar tensor.
-    """
-    mse = mse_loss(rendered, target).clamp_min(1e-12)
-    return 10.0 * torch.log10(1.0 / mse)
-
-
-# ---- Structural loss: a cheap SSIM substitute --------------------------------
+# ---- Structural loss --------------------------------------------------------
 
 def _to_bchw(img: Tensor) -> Tensor:
     """Convert (H, W, 3) or (B, H, W, 3) to (B, 3, H, W)."""
@@ -127,22 +117,7 @@ class LPIPSLoss:
         return self._fn(r, t).mean()
 
 
-# ---- Temporal losses -------------------------------------------------------
-
-def frame_differences(frames: Tensor) -> Tensor:
-    """Given a video of shape (T, H, W, 3), return (T-1, H, W, 3) frame diffs."""
-    return frames[1:] - frames[:-1]
-
-
-def temporal_l1_loss(rendered_video: Tensor, target_video: Tensor) -> Tensor:
-    """L1 on frame-differences. Encourages matching motion, not just pixels.
-
-    rendered_video, target_video: (T, H, W, 3).
-    """
-    return l1_loss(frame_differences(rendered_video), frame_differences(target_video))
-
-
-# ---- Combined multi-view loss ----------------------------------------------
+# ---- Combined photometric loss ---------------------------------------------
 
 def photometric_loss(
     rendered: Tensor,
