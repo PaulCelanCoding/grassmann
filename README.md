@@ -2,39 +2,37 @@
 
 Implementation of a Grassmannian-based Gaussian splatting pipeline for
 monocular video reconstruction. Each Gaussian is parameterized by a
-4-dimensional plane in R^4 (a point on the Grassmannian G(3,4)) plus a
-covariance factor, so the model represents a thin "disk" in space-time
-that becomes a moving 2D-Gaussian splat under perspective projection.
+3-dimensional plane in R^4 (a point on the Grassmannian G(3, 4)) plus a
+covariance factor over that plane, so it represents a thin "disk" in
+space–time that becomes a moving 2D Gaussian splat under perspective
+projection.
 
 Math spec: [`docs/maths/grassmanian_gradients_v7.md`](docs/maths/grassmanian_gradients_v7.md).
 
 ## Layout
 
 ```
-grassmann/        # library (geometry, rasterization, training, density control)
-  datasets/       # NeRFies + DyCheck loaders (monocular video)
-scripts/          # entry points (train, render, eval) + Modal wrappers
-tests/            # pytest suite
-docs/maths/       # math spec (v7)
-legacy/           # archived (unmaintained) experimental code
+grassmann/         # library (geometry, rasterization, training, density control)
+  datasets/        # NeRFies + DyCheck loaders (monocular video)
+scripts/           # train + render + eval entry points
+  comparison/      # Deformable3DGS and Yang 4DGS baseline drivers
+tests/             # pytest suite
+docs/maths/        # math spec (v7)
+legacy/            # archived reference code (older parameterizations,
+                   # triangulation, synthetic-scene visualizers)
 ```
 
 ## Install
 
+For development and tests:
+
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -e .                # if you've added a pyproject.toml
-# or:
 pip install -r requirements.txt
 ```
 
-GPU production training additionally requires the Inria diff-gaussian
-rasterizer (compiles a CUDA extension; see the commented line in
-`requirements.txt`):
-
-```bash
-pip install git+https://github.com/graphdeco-inria/diff-gaussian-rasterization.git
-```
+Training runs on Modal (CUDA) and uses an image defined inside
+`scripts/train_modal.py` — no separate local CUDA install is required.
 
 ## Datasets
 
@@ -43,82 +41,84 @@ Supported via `grassmann.datasets`:
 - **NeRFies / HyperNeRF** — drop scene directories under `data/nerfies/<scene>/`.
 - **DyCheck iPhone** — drop scenes under `data/dycheck/<scene>/`.
 
-Both expose the same `MonocularDataset` interface (cameras-per-frame, frame
-loader, normalized times in [0, 1], optional COLMAP point cloud +
+Both expose the same `MonocularDataset` interface (one camera per frame,
+lazy frame loader, normalized times in [0, 1], a COLMAP point cloud, and
 per-point observability).
 
-## Training — local
+## Training
 
-The canonical recipe (current best on the slice-banana scene):
-
-```bash
-python scripts/train_mono.py \
-  --dataset nerfies \
-  --scene_dir data/nerfies/slice-banana \
-  --output_dir checkpoints/slice-banana \
-  --num_iters 14000 \
-  --image_scale 4 \
-  --sigma_init_sq 0.02 \
-  --grassmann_relax_start 1000 --grassmann_relax_end 8000 \
-  --lambda_structural 0.2 \
-  --max_aspect_ratio 1000000 \
-  --random_background \
-  --sh_degree 3 \
-  --lr_decay 0.01 \
-  --densify_every 200 --densify_start 500 --densify_stop 10000 \
-  --grad_threshold 1e-5 --spatial_split_threshold 0.5 \
-  --opacity_prune_threshold 1e-3 --scale_min_prune 5e-3 \
-  --split_anisotropic_shrink \
-  --temporal_split_threshold 0.1 \
-  --lambda_frob 1e-4 \
-  --opacity_reset_every 3000
-```
-
-Recipe highlights:
-
-- Init starts in the static-3DGS regime (n = e_0 spatial slice) and
-  lets n tilt into a dynamic disk via the Prop 5.3 soft-clamp bridge
-  of the v7 spec.
-- `--split_anisotropic_shrink`: on split, shrink L_raw only along the
-  major axis. Avoids the cascading-small-Gaussian pathology of
-  isotropic /φ shrink.
-- `--max_aspect_ratio 1000000`: effectively uncapped in-plane aspect.
-  Structural loss is 1-SSIM (DSSIM). Together these match the
-  strongest mono baseline observed.
-
-Quality numbers from this recipe on slice-banana (14k iters, image
-scale 4): val PSNR around 24.5 dB, val LPIPS 0.41, walltime around
-300 s on an L4.
-
-## Training — Modal (L4)
+Training runs on Modal (L4 GPU). One-time data upload (from repo root):
 
 ```bash
 modal volume create gs-mono
 modal volume put gs-mono ./data/nerfies/slice-banana /slice-banana
-
-modal run scripts/train_modal.py --cmd train \
-  --dataset nerfies --scene slice-banana \
-  --iters 14000 --init-strategy spatial-slice ...
 ```
 
-`train_modal.py` is a thin wrapper around `train_mono.py` that prepares
-the Modal image, mounts the `gs-mono` and `gs-checkpoints` volumes, and
-shells out to the training script.
+Canonical recipe (current best on the slice-banana scene, 14k iters at
+image scale 2):
+
+```bash
+modal run scripts/train_modal.py --cmd train \
+  --dataset nerfies --scene slice-banana \
+  --iters 14000 \
+  --sigma-init-sq 0.02 \
+  --grassmann-relax-start 1000 --grassmann-relax-end 8000 \
+  --lambda-structural 0.2 \
+  --max-aspect-ratio 1000000 \
+  --random-background \
+  --sh-degree 3 \
+  --lr-decay 0.01 \
+  --densify-every 200 --densify-start 500 --densify-stop 10000 \
+  --grad-threshold 1e-5 --spatial-split-threshold 0.5 \
+  --opacity-prune-threshold 1e-3 --scale-min-prune 5e-3 \
+  --split-anisotropic-shrink \
+  --temporal-split-threshold 0.1 \
+  --lambda-frob 1e-4 \
+  --opacity-reset-every 3000
+```
+
+Recipe highlights:
+
+- Init places n = e_0 (every Gaussian's plane is the {t = 0} spatial
+  slice), so the model starts in a static-3DGS regime. The
+  `grassmann_relax_*` ramp keeps lr_n small early and unlocks the n
+  tilt over the next several thousand iters. The Schur step uses the
+  v7-doc Prop 5.3 soft clamp √(Σ_tt² + ε²), which makes that
+  static-to-dynamic transition C^∞-smooth.
+- `--split_anisotropic_shrink`: on split, shrink L_raw only along the
+  axis being split. The default isotropic /φ shrinks all three
+  eigenvalues per split, so cascading splits collapse Gaussians.
+- `--max_aspect_ratio 1000000` is effectively uncapped in-plane aspect.
+  Combined with the 1-SSIM (DSSIM) structural loss it matches the
+  strongest mono baseline observed.
+
+Reference numbers on slice-banana with this recipe (14k iters, scale 2):
+val PSNR around 24.5 dB, val LPIPS ≈ 0.41, walltime ≈ 5 min on an L4.
+
+`scripts/train_modal.py` builds the CUDA image, mounts the gs-mono and
+gs-checkpoints volumes, and inside the container shells out to
+`scripts/train_mono.py` — that script is the actual training driver and
+holds the full CLI surface.
 
 ## Rendering / evaluation
 
-- `scripts/render_mono.py` — render arbitrary frames from a saved checkpoint.
-- `scripts/eval_apples.py` — apples-to-apples PSNR/SSIM/LPIPS against a
-  pre-rendered GT directory.
-- `scripts/eval_per_frame.py` — Modal-side full-pipeline eval (renders
-  every train+val frame through the CUDA rasterizer + reports per-frame
-  metrics).
-- `scripts/collate_eval.py` — collate `*.json` summaries across runs
-  into one markdown table.
+```bash
+modal run scripts/train_modal.py --cmd render \
+  --dataset nerfies --scene slice-banana \
+  --ckpt <run-dir>/trained_nerfies.pt --frames 0,50,100
 
-For independent baselines (Deformable3DGS, Yang 4DGS) see
-`scripts/comparison/`. The "bugF" prefix in those filenames is a
-historical checkpoint label.
+modal run scripts/train_modal.py --cmd eval_per_frame \
+  --dataset nerfies --scene slice-banana \
+  --ckpt <run-dir>/trained_nerfies.pt
+```
+
+Local helpers (operate on already-rendered images):
+
+- `scripts/eval_apples.py` — PSNR/SSIM/LPIPS against a pre-rendered GT directory.
+- `scripts/collate_eval.py` — collate per-run `*.json` summaries into a markdown table.
+
+Baselines for comparison (Deformable3DGS, Yang 4DGS) live under
+`scripts/comparison/`.
 
 ## Tests
 
@@ -126,12 +126,10 @@ historical checkpoint label.
 pytest tests/ -q
 ```
 
-The active suite covers the surviving (3-plane G(3,4)) paths: numerical
-correctness of `compute_derived` / `condition_on_time`, dataset loaders,
-and the quaternion + Grassmann primitives.
+The active suite covers the 3-plane G(3, 4) path: numerical correctness
+of `compute_derived` / `condition_on_time`, and the dataset loaders.
 
 ## Agent contributors
 
-Some changes in the git history were authored together with Claude
-Code. Agent-team rules and conventions are in `AGENTS.md` (read by
-Claude Code's harness).
+Some changes in the git history were authored together with Claude Code.
+Agent-team rules and conventions for assisted edits live in `AGENTS.md`.
