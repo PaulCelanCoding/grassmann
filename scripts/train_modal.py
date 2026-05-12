@@ -185,12 +185,6 @@ def train(
     floater_eps: float,
     sh_degree_warmup_step: int,
     lambda_opacity_entropy: float,
-    density_strategy: str,
-    mcmc_noise_lr: float,
-    mcmc_noise_after: int,
-    mcmc_noise_gate_k: float,
-    mcmc_noise_gate_thr: float,
-    mcmc_max_relocations_per_step: int,
     split_anisotropic_shrink: bool,
     split_opacity_correction: bool,
     split_opacity_brighter: bool,
@@ -329,15 +323,6 @@ def train(
         argv += ["--sh_degree_warmup_step", str(sh_degree_warmup_step)]
     if lambda_opacity_entropy > 0:
         argv += ["--lambda_opacity_entropy", str(lambda_opacity_entropy)]
-    if density_strategy != "heuristic":
-        argv += ["--density_strategy", density_strategy]
-    if mcmc_noise_lr > 0:
-        argv += ["--mcmc_noise_lr", str(mcmc_noise_lr),
-                 "--mcmc_noise_after", str(mcmc_noise_after),
-                 "--mcmc_noise_gate_k", str(mcmc_noise_gate_k),
-                 "--mcmc_noise_gate_thr", str(mcmc_noise_gate_thr)]
-    if mcmc_max_relocations_per_step > 0:
-        argv += ["--mcmc_max_relocations_per_step", str(mcmc_max_relocations_per_step)]
     if split_anisotropic_shrink:
         argv.append("--split_anisotropic_shrink")
     if split_opacity_correction:
@@ -523,12 +508,6 @@ def main(
     floater_eps: float = 1e-3,
     sh_degree_warmup_step: int = 0,
     lambda_opacity_entropy: float = 0.0,
-    density_strategy: str = "heuristic",
-    mcmc_noise_lr: float = 0.0,
-    mcmc_noise_after: int = 0,
-    mcmc_noise_gate_k: float = 100.0,
-    mcmc_noise_gate_thr: float = 0.005,
-    mcmc_max_relocations_per_step: int = 0,
     split_anisotropic_shrink: bool = False,
     split_opacity_correction: bool = False,
     split_opacity_brighter: bool = False,
@@ -623,12 +602,6 @@ def main(
             floater_eps=floater_eps,
             sh_degree_warmup_step=sh_degree_warmup_step,
             lambda_opacity_entropy=lambda_opacity_entropy,
-            density_strategy=density_strategy,
-            mcmc_noise_lr=mcmc_noise_lr,
-            mcmc_noise_after=mcmc_noise_after,
-            mcmc_noise_gate_k=mcmc_noise_gate_k,
-            mcmc_noise_gate_thr=mcmc_noise_gate_thr,
-            mcmc_max_relocations_per_step=mcmc_max_relocations_per_step,
             split_anisotropic_shrink=split_anisotropic_shrink,
             split_opacity_correction=split_opacity_correction,
             split_opacity_brighter=split_opacity_brighter,
@@ -716,12 +689,6 @@ def main(
             floater_eps=floater_eps,
             sh_degree_warmup_step=sh_degree_warmup_step,
             lambda_opacity_entropy=lambda_opacity_entropy,
-            density_strategy=density_strategy,
-            mcmc_noise_lr=mcmc_noise_lr,
-            mcmc_noise_after=mcmc_noise_after,
-            mcmc_noise_gate_k=mcmc_noise_gate_k,
-            mcmc_noise_gate_thr=mcmc_noise_gate_thr,
-            mcmc_max_relocations_per_step=mcmc_max_relocations_per_step,
             split_anisotropic_shrink=split_anisotropic_shrink,
             split_opacity_correction=split_opacity_correction,
             split_opacity_brighter=split_opacity_brighter,

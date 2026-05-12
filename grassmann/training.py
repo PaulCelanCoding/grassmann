@@ -687,15 +687,6 @@ class Trainer:
             running_psnr += psnr_val
 
             with self._phase("post_step"):
-                # #4.1 MCMC: SGLD noise on μ_spatial after the optimizer step.
-                # Independent of density_strategy: noise_lr > 0 enables it (so it
-                # can be probed atop the heuristic densifier too).
-                if (self.density_tracker is not None
-                        and self.config.density_config.mcmc_noise_lr > 0.0):
-                    self.density_tracker.mcmc_noise_step(
-                        self.config.density_config, iter_num=i,
-                    )
-
                 if i % self.config.renormalize_every == 0:
                     self.renormalize_manifolds()
 
@@ -742,19 +733,9 @@ class Trainer:
                     stats = self.density_tracker.densify_and_prune(
                         self.config.density_config,
                     )
-                strat = self.config.density_config.density_strategy
-                if strat == "mcmc":
-                    print(f"  [density @ iter {i:5d}] mcmc relocated={stats.get('relocated', 0):4d} "
-                          f"N={stats['final_N']}")
-                elif strat == "hybrid":
-                    print(f"  [density @ iter {i:5d}] hybrid split={stats['split']:4d} "
-                          f"tsplit={stats.get('tsplit', 0):3d} "
-                          f"relocated={stats.get('relocated', 0):4d} "
-                          f"pruned={stats['pruned']:4d} N={stats['final_N']}")
-                else:
-                    print(f"  [density @ iter {i:5d}] split={stats['split']:4d} "
-                          f"tsplit={stats.get('tsplit', 0):3d} "
-                          f"pruned={stats['pruned']:4d} N={stats['final_N']}")
+                print(f"  [density @ iter {i:5d}] split={stats['split']:4d} "
+                      f"tsplit={stats.get('tsplit', 0):3d} "
+                      f"pruned={stats['pruned']:4d} N={stats['final_N']}")
 
             if i % le == 0:
                 avg_loss = running_loss / le
