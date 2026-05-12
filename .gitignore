@@ -55,6 +55,8 @@ results/renders_*/
 results/rca/blur_rca/**/triptychs/
 results/rca/blur_rca/**/quadtych_*/*.png
 results/rca/blur_rca/**/figure_overview.png
+results/rca/multi_scene_isowall/**/*_pngs/
+results/rca/multi_scene_isowall/**/triptychs/
 
 # Claude Code internal state
 .claude/
