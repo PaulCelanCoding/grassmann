@@ -1,9 +1,8 @@
 """
 Adaptive density control for the 3-plane (G(3,4)) projector parameterization.
 
-Phase C of the monocular pivot. Replaces the legacy 2-plane DC that was
-empirically net-negative under the rank-1 Σ_3D(t_0) constraint. The new
-DC follows the reviewer's recipe:
+Replaces the original 2-plane density control that was empirically
+net-negative under the rank-1 Σ_3D(t_0) constraint. The recipe:
 
   * Trigger: screen-space ‖∇μ_2d‖ accumulated across views (the standard
     3DGS trigger). Captured from the CUDA rasterizer's means2D dummy
@@ -75,7 +74,7 @@ class DensityConfig:
                                          # (0.7 m std) at scale 1m.
     split_shrink_factor: float = 1.6     # children L_raw /= phi (variance /= phi²).
     split_offset_sigmas: float = 1.0     # split children placed at ±N·σ_max.
-    # Bug F: anisotropic L-shrinkage on split. The default (isotropic /φ)
+    # Anisotropic L-shrinkage on split. The default (isotropic /φ)
     # shrinks ALL three Σ_3D eigenvalues uniformly per split, generating
     # tiny "zombie" Gaussians after a few cascading splits. When True,
     # only the major-axis direction (the one being split along) shrinks by
@@ -86,7 +85,7 @@ class DensityConfig:
     opacity_threshold: float = 1e-3      # prune if sigmoid(opacity_logit) < this.
     scale_min: float = 1e-6              # prune if λ_min(Σ_3D) < this (collapsed).
     scale_max: float = 100.0             # prune if λ_max(Σ_3D) > this (runaway).
-    # #4.2 temporal-axis split: trigger when stressed AND Σ_tt > threshold.
+    # Temporal-axis split: trigger when stressed AND Σ_tt > threshold.
     # Children offset by ±N·sqrt(Σ_tt) along the time axis (μ_t component).
     # 0 disables.
     temporal_split_threshold: float = 0.0
@@ -112,9 +111,6 @@ class DensityTracker:
         N = model.N
         self.grad_accum = torch.zeros(N, dtype=dtype, device=device)
         self.grad_counts = torch.zeros(N, dtype=torch.long, device=device)
-        # #8.1 floater detection: count active iters (grad_norm > eps) per Gaussian.
-        self.active_counts = torch.zeros(N, dtype=torch.long, device=device)
-        # Bug G: count densify_and_prune() calls so merge() can fire on a coarser cadence.
         self._density_call_count = 0
 
     def accumulate(self, means2d: Optional[Tensor]) -> None:
@@ -135,8 +131,6 @@ class DensityTracker:
             return
         self.grad_accum += mag.detach()
         self.grad_counts += 1
-        # #8.1: track which Gaussians are 'active' (any meaningful screen grad).
-        self.active_counts += (mag.detach() > 1e-9).long()
 
     def mean_grad(self) -> Tensor:
         counts = self.grad_counts.clamp_min(1)
@@ -145,7 +139,6 @@ class DensityTracker:
     def reset(self) -> None:
         self.grad_accum.zero_()
         self.grad_counts.zero_()
-        self.active_counts.zero_()
 
     # --- Adam-state-aware row mutations -----------------------------------
 
@@ -196,7 +189,6 @@ class DensityTracker:
                 self._migrate_optimizer_state(old, new, slice_idx=idx)
         self.grad_accum = self.grad_accum[idx].contiguous()
         self.grad_counts = self.grad_counts[idx].contiguous()
-        self.active_counts = self.active_counts[idx].contiguous()
 
     def _append_rows(self, new_data: dict[str, Tensor]) -> None:
         names = _per_gaussian_param_names(self.model)
@@ -218,9 +210,6 @@ class DensityTracker:
         self.grad_counts = torch.cat(
             [self.grad_counts, torch.zeros(n_new, dtype=torch.long, device=device)]
         )
-        self.active_counts = torch.cat(
-            [self.active_counts, torch.zeros(n_new, dtype=torch.long, device=device)]
-        )
 
     # --- Σ_3D spectral helpers --------------------------------------------
 
@@ -231,9 +220,9 @@ class DensityTracker:
         """Compute (Σ_3D, eigvals, λ_min, λ_max) per Gaussian.
 
         post_schur=False (default): pre-Schur Σ_3D = Σ_4D[1:,1:] (rank ≤ 3).
-            eigs[:,1] is the MIDDLE eigenvalue (legacy "lam_min_nonzero").
+            eigs[:,1] is the middle eigenvalue.
 
-        post_schur=True (Bug I): Σ_3D_t = Σ_3D − cc^T/σ_tt (rank-2, t-invariant).
+        post_schur=True: Σ_3D_t = Σ_3D − cc^T/σ_tt (rank-2, t-invariant).
             This is exactly what the rasterizer sees as the in-plane disk.
             eigs[:,0] ≈ 0 (kernel direction), eigs[:,1] is the true in-plane
             λ_min, eigs[:,2] is the in-plane λ_max.
@@ -266,7 +255,7 @@ class DensityTracker:
             collapsed_mask = lam_min < config.scale_min
             runaway_mask = lam_max > config.scale_max
             drop_mask = low_op_mask | collapsed_mask | runaway_mask
-            # RCA diagnostic: opacity distribution (cheap, ~1 ms per call).
+            # Diagnostic: opacity distribution (cheap, ~1 ms per call).
             qs = torch.quantile(
                 opacity,
                 torch.tensor([0.01, 0.05, 0.50, 0.95, 0.99],
@@ -334,7 +323,7 @@ class DensityTracker:
             L_raw_old = self.model.L_raw.data[idx]                      # (k, 4, 3)
 
             if config.split_anisotropic_shrink:
-                # Bug F: shrink only the major spatial direction by 1/φ.
+                # Anisotropic shrink: only the major spatial direction by 1/φ.
                 # A_4 = blockdiag(1, A_3) where A_3 = I − (1 − 1/φ) u u^T
                 # acts on the OUTPUT (row) space of L_plane: A_3 u = u/φ,
                 # A_3 v = v for v ⊥ u. Then Σ_3D' = A_3 Σ_3D A_3^T scales
@@ -385,7 +374,7 @@ class DensityTracker:
         return n_split
 
     def temporal_split(self, config: DensityConfig) -> int:
-        """#4.2: split stressed Gaussians with large Σ_tt along the time axis.
+        """Split stressed Gaussians with large Σ_tt along the time axis.
 
         Triggered when grad > grad_threshold AND Σ_tt > temporal_split_threshold.
         Children offset by ±N·sqrt(Σ_tt) on μ_t; L_raw shrunk by split_shrink_factor.
@@ -422,7 +411,7 @@ class DensityTracker:
             L_raw_old = self.model.L_raw.data[idx]                      # (k, 4, 3)
 
             if config.split_anisotropic_shrink:
-                # Bug F (temporal variant): shrink ONLY the time row of L_plane
+                # Anisotropic shrink (temporal variant): shrink ONLY the time row of L_plane
                 # by 1/φ. This scales Σ_tt → Σ_tt/φ², c_world → c_world/φ, and
                 # leaves Σ_3D unchanged. Post-Schur Σ_3D_t = Σ_3D − cc^T/σ_tt
                 # is also invariant: (c/φ)(c/φ)^T / (σ_tt/φ²) = cc^T/σ_tt.

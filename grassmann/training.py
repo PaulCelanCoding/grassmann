@@ -98,14 +98,14 @@ class TrainerConfig:
     # position_lr_init = 0.01 schedule over 30k iters. Color/opacity not scheduled
     # (3DGS does the same).
     lr_decay: float = 1.0
-    # #6.2: hard cap on aspect ratio λ_max/λ_min of Σ_3D in-plane eigenvalues
+    # Hard cap on aspect ratio λ_max/λ_min of Σ_3D in-plane eigenvalues
     # (equivalently (s_max/s_min)² of P_n L_raw singular values). 0 disables.
     # Applied every `aspect_clip_every` iters as a no-grad SVD-based projection.
     max_aspect_ratio: float = 0.0
     aspect_clip_every: int = 100
     # Background color for rendering
     background: Tensor = field(default_factory=lambda: torch.tensor([0.05, 0.05, 0.1]))
-    # #7.2: at each train_step, replace the constant `background` with a
+    # At each train_step, replace the constant `background` with a
     # uniform random RGB sample. Validation/render still uses `background`.
     random_background: bool = False
     # Validation
@@ -120,7 +120,7 @@ class TrainerConfig:
     densify_start: int = 500          # don't start densification before this iteration
     densify_stop: int = 15000         # stop densification after this iteration
     density_config: Optional[DensityConfig] = None  # hyperparams; defaults built if None
-    # Fast rasterizer (Phase 7)
+    # Fast (CUDA) rasterizer
     use_fast_rasterizer: bool = False  # True -> use CUDA diff-gaussian-rasterization if available
     fast_raster_config: Optional[FastRasterConfig] = None  # defaults built if None
     # Sampling mode
@@ -130,7 +130,8 @@ class TrainerConfig:
     # within the same pipeline. The gap between this and the full temporal run
     # quantifies the value of time conditioning.
     static_baseline: bool = False
-    # Phase-A-correctness penalties (RCA: 32% dead, 30% high-aniso, 7% rank-1-collapsed):
+    # Correctness penalties (investigation found 32% dead, 30% high-aniso,
+    # 7% rank-1-collapsed Gaussians in unpenalized runs):
     #   lambda_frob: Frobenius-norm penalty on L_raw -- prevents the optimizer from
     #     soft-collapsing rank by routing capacity into the n̂ direction (which the
     #     projector annihilates). Recommended ~1e-4.
@@ -140,7 +141,7 @@ class TrainerConfig:
     lambda_frob: float = 0.0
     opacity_reset_every: int = 0
     opacity_reset_logit: float = -5.0
-    # #3.2 progressive Grassmann relaxation: scale lr_n from 0 → base over
+    # Progressive Grassmann relaxation: scale lr_n from 0 → base over
     # [grassmann_relax_start, grassmann_relax_end]. Use with init_strategy=
     # spatial_slice (n=e₀ at init) so the geometry settles in the static-3DGS
     # regime before n is allowed to tilt. 0/0 disables.
@@ -218,7 +219,7 @@ class Trainer:
 
         # Density control (Phase 6). The tracker holds a reference to the
         # optimizer so density events can migrate Adam state in place rather
-        # than rebuilding from scratch (RCA Bug D fix).
+        # than rebuilding from scratch.
         self.density_tracker: Optional[DensityTracker] = None
         if self.config.densify_every > 0:
             self.density_tracker = DensityTracker(model, self.optimizer)
@@ -318,7 +319,7 @@ class Trainer:
             target = self.get_frame(cam_idx, t_idx).to(self.model.n_raw.dtype)
 
         with self._phase("forward_render"):
-            # #7.2 random background during training only.
+            # Random background during training only.
             bg_override = None
             if self.config.random_background:
                 bg_override = torch.rand(3, dtype=self.model.n_raw.dtype,
@@ -337,7 +338,7 @@ class Trainer:
                 lambda_lpips=self.config.lambda_lpips,
             )
 
-            # Phase-A-correctness penalties.
+            # Correctness penalties.
             if self.config.lambda_frob > 0.0:
                 # Mean-squared L_raw entries; targets the soft-rank-collapse pathology
                 # where the optimizer routes capacity into the projector's null direction.
@@ -478,7 +479,7 @@ class Trainer:
                         name = group["name"]
                         if name in self._base_lrs:
                             group["lr"] = self._base_lrs[name] * scale
-                # #3.2 progressive Grassmann relaxation: scale lr_n 0 → base
+                # Progressive Grassmann relaxation: scale lr_n 0 → base
                 # over [start, end]. Idle if both 0.
                 r_start = self.config.grassmann_relax_start
                 r_end = self.config.grassmann_relax_end
@@ -507,7 +508,7 @@ class Trainer:
                 if i % self.config.renormalize_every == 0:
                     self.renormalize_manifolds()
 
-                # #6.2 hard aspect-ratio clip on Σ_3D in-plane eigenvalues.
+                # Hard aspect-ratio clip on Σ_3D in-plane eigenvalues.
                 if (self.config.max_aspect_ratio > 0
                         and i % self.config.aspect_clip_every == 0):
                     clipped = self.model.clip_aspect_ratio_(self.config.max_aspect_ratio)
@@ -523,7 +524,7 @@ class Trainer:
                                     if "exp_avg_sq" in state:
                                         state["exp_avg_sq"].zero_()
 
-                # Periodic opacity reset (Phase-A-correctness: addresses 32%-dead pathology).
+                # Periodic opacity reset (addresses the dead-Gaussian pathology).
                 if (self.config.opacity_reset_every > 0
                         and i % self.config.opacity_reset_every == 0):
                     with torch.no_grad():

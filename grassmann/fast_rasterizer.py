@@ -1,5 +1,5 @@
 """
-Phase 7: Fast rasterization via diff-gaussian-rasterization (GPU/CUDA).
+Fast rasterization via diff-gaussian-rasterization (GPU/CUDA).
 
 Adapter between our Grassmann model and the original Inria 3DGS rasterizer.
 The Jacobian paper §9.1 and §10 specifically designed the 3D-lifted approach

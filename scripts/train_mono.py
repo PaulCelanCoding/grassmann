@@ -1,6 +1,6 @@
 """
-Local entrypoint for monocular training (NeRFies / DyCheck) under the 3-plane
-projector parameterization (Phase A).
+Local entrypoint for monocular training (NeRFies / DyCheck) under the
+3-plane (G(3,4)) projector parameterization.
 
 Usage (from repo root):
   python scripts/train_mono.py \
@@ -10,12 +10,9 @@ Usage (from repo root):
       --output_dir checkpoints/<scene>
 
 Loads a MonocularDataset, initializes the per-frame Gaussian model from the
-scene's point cloud + observability, and runs the standard Trainer in
-monocular sampling mode.
-
-Density control is disabled by default (Phase A: --densify_every defaults
-to 0 because the legacy DC targeted the 2-plane param and is incompatible
-with the new param; see the plan for Phase C re-introduction).
+scene's point cloud + observability, and runs the Trainer in monocular
+sampling mode. Density control is disabled by default; pass
+--densify_every > 0 to enable adaptive split / temporal-split / prune.
 """
 from __future__ import annotations
 
@@ -98,7 +95,7 @@ def main():
                     help="Treat scenes with non-zero radial/tangential distortion "
                          "as pinhole. Geometry is approximate -- smoke runs only.")
     ap.add_argument("--densify_every", type=int, default=0,
-                    help="Density-control event frequency. 0 disables. Phase C: "
+                    help="Density-control event frequency. 0 disables. "
                          "200 is a reasonable default; standard 3DGS uses 100.")
     ap.add_argument("--densify_start", type=int, default=500,
                     help="Earliest iter at which DC events fire. Lets the model "
@@ -150,14 +147,14 @@ def main():
                          "current scale + N. If our full temporal run on the same frame "
                          "is much lower, the gap = motion residuals. -1 disables.")
     ap.add_argument("--lambda_frob", type=float, default=0.0,
-                    help="Frobenius-norm penalty on L_raw (Phase-A-correctness). "
-                         "Recommended ≈1e-4. Targets the 7%% rank-1-collapse pathology where "
+                    help="Frobenius-norm penalty on L_raw (correctness term). "
+                         "Recommended ≈1e-4. Targets the rank-1-collapse pathology where "
                          "the optimizer routes capacity into n̂ (projector null-direction).")
     ap.add_argument("--opacity_reset_every", type=int, default=0,
-                    help="Periodic opacity-logit reset (Phase-A-correctness). Every N "
-                         "iters, opacity_logit -> opacity_reset_logit; Adam state for "
+                    help="Periodic opacity-logit reset. Every N iters, "
+                         "opacity_logit -> opacity_reset_logit; Adam state for "
                          "opacity_logit is also zeroed. 0 disables. Standard 3DGS uses "
-                         "3000. Targets the 32%%-dead pathology.")
+                         "3000. Targets the dead-Gaussian pathology.")
     ap.add_argument("--opacity_reset_logit", type=float, default=-5.0,
                     help="Target opacity_logit at reset. -5 -> sigmoid(-5)≈0.007.")
     ap.add_argument("--lr_decay", type=float, default=1.0,
@@ -210,35 +207,32 @@ def main():
                          "Only meaningful with --init_points_path. If absent, points "
                          "default to gray (0.5, 0.5, 0.5).")
     ap.add_argument("--random_background", action="store_true",
-                    help="#7.2: per-step uniform-random RGB background "
+                    help="Per-step uniform-random RGB background "
                          "during training (validation still uses fixed bg).")
     ap.add_argument("--max_aspect_ratio", type=float, default=0.0,
-                    help="#6.2: hard cap on Σ_3D in-plane aspect ratio "
+                    help="Hard cap on Σ_3D in-plane aspect ratio "
                          "λ_max/λ_min via SVD-clip on P_n L_raw. 0 disables. "
-                         "30 is a sane default (penalty alone leaves p99~6.8e7).")
+                         "30 is a sane default; pass a very large value "
+                         "(e.g. 1e6) to leave aspect uncapped.")
     ap.add_argument("--aspect_clip_every", type=int, default=100,
-                    help="#6.2: how often to apply the aspect-ratio clip.")
-    ap.add_argument("--time_coherence_dt", type=float, default=0.05,
-                    help="#5.3: dt offset (in normalized time units, "
-                         "ds.times in [0,1]) for the coherence pair.")
+                    help="How often (in iters) to apply the aspect-ratio clip.")
     ap.add_argument("--temporal_split_threshold", type=float, default=0.0,
-                    help="#4.2: Σ_tt threshold for temporal-axis split. "
+                    help="Σ_tt threshold for temporal-axis split. "
                          "Stressed Gaussians with Σ_tt > thr are split along "
                          "the time axis (μ_t shifted ±N·sqrt(Σ_tt)). 0 disables.")
     ap.add_argument("--grassmann_relax_start", type=int, default=0,
-                    help="#3.2: iter when lr_n starts ramping from 0 → base. "
+                    help="Iter when lr_n starts ramping from 0 → base. "
                          "Use with --init_strategy spatial_slice.")
     ap.add_argument("--grassmann_relax_end", type=int, default=0,
-                    help="#3.2: iter when lr_n reaches base. 0 disables.")
+                    help="Iter when lr_n reaches base. 0 disables.")
     ap.add_argument("--mip_filter_sigma_pixel", type=float, default=0.0,
-                    help="#7.1: resolution-aware 3D smoothing filter half-width "
+                    help="Resolution-aware 3D smoothing filter half-width "
                          "in pixels. Adds (σ_pixel · depth / focal)² · I to "
                          "Σ_3D(t_0) per-Gaussian. 0 disables. ~0.3 typical.")
-    # Bug F: anisotropic split shrinkage. Bug H: Kheradmand opacity-split.
     ap.add_argument("--split_anisotropic_shrink", action="store_true",
-                    help="Bug F: shrink L_raw only along the major axis on "
+                    help="Shrink L_raw only along the major axis on "
                          "split (1/φ on that axis, others preserved). Default "
-                         "OFF (legacy isotropic /φ — generates zombie cascade).")
+                         "OFF (isotropic /φ — generates cascading 'zombie' splits).")
     ap.add_argument("--split_shrink_factor", type=float, default=1.6,
                     help="φ in L_raw /= φ on split (variance /= φ²). 1.0 disables shrink.")
     ap.add_argument("--split_offset_sigmas", type=float, default=1.0,

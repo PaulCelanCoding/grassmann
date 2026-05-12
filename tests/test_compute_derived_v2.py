@@ -1,4 +1,4 @@
-"""Phase A smoke test for the 3-plane projector parameterization.
+"""Smoke test for the 3-plane (G(3,4)) projector parameterization.
 
 Verifies the three load-bearing math properties of the new compute_derived /
 condition_on_time:

@@ -12,12 +12,11 @@ import pytest
 from _fixture_builders import build_mini_nerfies_scene
 
 
-# Phase A (3-plane projector pivot): tests that target the legacy 2-plane
-# parameterization (p_im, q_im, alpha_0, beta_0, L=2x2) are skipped at
-# collection. They will be rewritten in Phase B against the new param.
-# See ~/.claude/plans/grassmann-splatting-on-imperative-rocket.md.
+# These tests target the legacy 2-plane parameterization (p_im, q_im,
+# alpha_0, beta_0, L=2x2) and have not been ported to the current 3-plane
+# G(3,4) projector form. They are skipped at collection to keep the suite
+# green; the active suite covers the surviving paths.
 collect_ignore = [
-    "test_init_strategies.py",
     "test_dataset_nerfies.py",
     "test_density_control.py",
     "test_time_normalization.py",

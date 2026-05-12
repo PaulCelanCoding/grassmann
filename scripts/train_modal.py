@@ -1,5 +1,5 @@
 """
-Modal entry for monocular GPU training on L4 (Phase A: 3-plane projector).
+Modal entry for monocular GPU training on L4 (3-plane G(3,4) projector).
 
 Volumes (created on first run):
   gs-mono         /data          NeRFies / DyCheck scenes
@@ -18,10 +18,8 @@ Usage:
       --ckpt nerfies-slice-banana-random-30000it/trained_nerfies_random.pt \
       --frames 0,50,100 --side-by-side
 
-Density control is disabled in Phase A (the legacy DC targets the 2-plane
-parameterization; see the plan, Phase C, for re-introduction). The
-`init_strategy` and `sigma_3d_blur` flags are the only meaningful knobs
-exposed here.
+Density control is disabled by default; pass --densify_every > 0 to enable
+adaptive split / temporal-split / prune.
 """
 import subprocess
 from pathlib import Path
