@@ -3,6 +3,9 @@
 Rules for agent-assisted work on this repository. Human-facing project
 docs are in `README.md`.
 
+# Goal: 
+We are implementing @docs/maths
+
 ## Communication
 
 - Always reply in English.
@@ -29,17 +32,3 @@ docs are in `README.md`.
   non-obvious invariants. Cite `v7-doc Sec. X.Y` / `Prop X.Y` when
   implementing a specific operator from the math spec.
 
-## Workflow
-
-- Track multi-step work via the `TaskCreate` / `TaskUpdate` tools; mark
-  the active task `in_progress` before starting it.
-- After each removal commit, run the per-commit gate:
-
-  ```bash
-  grep -rn "<removed-symbol>" grassmann scripts tests docs results   # must be empty
-  pytest -x tests/ -q                                                # must stay green
-  python scripts/train_mono.py --help | grep -E "<removed-flag>"     # must be empty
-  ```
-
-- Do not push to the default branch without explicit user approval. The
-  cleanup work should land on a topic branch first.
