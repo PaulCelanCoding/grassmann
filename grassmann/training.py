@@ -110,10 +110,8 @@ class TrainerConfig:
     random_background: bool = False
     # Validation
     validation_every: int = 0          # 0 = disabled
-    validation_cams: Optional[list[int]] = None  # which camera indices to evaluate on
-    validation_times: Optional[list[float]] = None  # which times
-    validation_frames: Optional[list[int]] = None  # monocular: which frame indices
-    train_frames: Optional[list[int]] = None       # monocular: restrict train sampling to this subset
+    validation_frames: Optional[list[int]] = None  # which frame indices
+    train_frames: Optional[list[int]] = None       # restrict train sampling to this subset
                                                    # (defaults to all T frames if None)
     # Density control (Phase 6)
     densify_every: int = 0            # 0 = disabled
@@ -123,8 +121,6 @@ class TrainerConfig:
     # Fast (CUDA) rasterizer
     use_fast_rasterizer: bool = False  # True -> use CUDA diff-gaussian-rasterization if available
     fast_raster_config: Optional[FastRasterConfig] = None  # defaults built if None
-    # Sampling mode
-    monocular: bool = False  # True -> cameras list is per-frame; t_idx == cam_idx; one sample per step
     # Static baseline: disable time conditioning entirely (Schur step skipped,
     # w_t=1 always). Used to measure the "static-3DGS-on-monocular-bundle" floor
     # within the same pipeline. The gap between this and the full temporal run
@@ -250,10 +246,6 @@ class Trainer:
             frame = self.frame_data(cam_idx, self.times[t_idx])
         return frame.to(device=self.model.n_raw.device)
 
-    def _perturbed_camera(self, cam_idx: int):
-        """No-op pass-through (pose-refinement was removed)."""
-        return self.cameras[cam_idx]
-
     def render_one(self, cam_idx: int, t_value: float,
                    means2d_capture: Optional[list] = None,
                    bg_override: Optional[Tensor] = None) -> Tensor:
@@ -273,7 +265,7 @@ class Trainer:
         if self.config.use_fast_rasterizer and fast_available() and params.n.is_cuda:
             fc = self.config.fast_raster_config or FastRasterConfig()
             return fast_rasterize(
-                params, t_value, self._perturbed_camera(cam_idx), self.H, self.W,
+                params, t_value, self.cameras[cam_idx], self.H, self.W,
                 background=bg, config=fc,
                 static_baseline=self.config.static_baseline,
                 means2d_capture=means2d_capture,
@@ -283,23 +275,19 @@ class Trainer:
             means2d_capture.append(None)
         derived = compute_derived(params)
         tc = condition_on_time(params, derived, t_value, static=self.config.static_baseline)
-        sg = project_to_screen(params, tc, self._perturbed_camera(cam_idx))
+        sg = project_to_screen(params, tc, self.cameras[cam_idx])
         return rasterize(sg, H=self.H, W=self.W, background=bg)
 
     def train_step(self, iter_num: int = 0) -> tuple[float, float, float]:
         """One stochastic training step. Returns (total loss, L1, PSNR_dB)."""
         self.current_iter = iter_num
-        # Sample a frame.
+        # Sample a frame. Monocular: one camera per frame, sampled together;
+        # self.K == self.T and t_idx == cam_idx.
         with self._phase("data"):
-            if self.config.monocular:
-                # Monocular: one camera per frame, sampled together. self.K must equal self.T.
-                train_pool = self.config.train_frames if self.config.train_frames else list(range(self.T))
-                pick = torch.randint(0, len(train_pool), (1,)).item()
-                t_idx = int(train_pool[pick])
-                cam_idx = t_idx
-            else:
-                cam_idx = torch.randint(0, self.K, (1,)).item()
-                t_idx = torch.randint(0, self.T, (1,)).item()
+            train_pool = self.config.train_frames if self.config.train_frames else list(range(self.T))
+            pick = torch.randint(0, len(train_pool), (1,)).item()
+            t_idx = int(train_pool[pick])
+            cam_idx = t_idx
             t_value = self.times[t_idx]
 
             # Target. If DC is enabled, capture the means2D dummy
@@ -359,47 +347,29 @@ class Trainer:
         self.model.renormalize_manifold_()
 
     def validate(self) -> dict[str, float]:
-        """Render held-out frames and compute mean L1.
+        """Render held-out frames in `validation_frames` and compute mean L1.
 
-        Monocular mode: iterate over `validation_frames`. Raises if no frames
-        are configured -- silently falling back to all frames would report
-        training-set L1 as val_l1 (fake-success signal; see CLAUDE.md).
-        Multi-cam (legacy): iterate over `validation_cams x validation_times`.
+        Raises if no frames are configured -- silently falling back to all
+        frames would report training-set L1 as val_l1 (fake-success signal;
+        see CLAUDE.md).
         """
+        frames = self.config.validation_frames
+        if not frames:
+            raise ValueError(
+                "Trainer.validate() called but config.validation_frames is "
+                "empty. Set validation_frames to a held-out subset, or set "
+                "validation_every=0."
+            )
         total_l1 = 0.0
         total_mse = 0.0
-        count = 0
         with torch.no_grad():
-            if self.config.monocular:
-                frames = self.config.validation_frames
-                if not frames:
-                    raise ValueError(
-                        "Trainer.validate() called in monocular mode but "
-                        "config.validation_frames is empty. Set validation_frames "
-                        "to a held-out subset, or set validation_every=0."
-                    )
-                for t_idx in frames:
-                    t_value = self.times[t_idx]
-                    target = self.get_frame(t_idx, t_idx).to(self.model.n_raw.dtype)
-                    rendered = self.render_one(t_idx, t_value)
-                    total_l1 += l1_loss(rendered, target).item()
-                    total_mse += mse_loss(rendered, target).item()
-                    count += 1
-            else:
-                cam_indices = self.config.validation_cams or list(range(self.K))
-                times = self.config.validation_times or self.times
-                for cam_idx in cam_indices:
-                    for t_idx, t_value in enumerate(times):
-                        try:
-                            t_frame_idx = self.times.index(t_value)
-                        except ValueError:
-                            continue
-                        target = self.get_frame(cam_idx, t_frame_idx).to(self.model.n_raw.dtype)
-                        rendered = self.render_one(cam_idx, t_value)
-                        total_l1 += l1_loss(rendered, target).item()
-                        total_mse += mse_loss(rendered, target).item()
-                        count += 1
-        n = max(count, 1)
+            for t_idx in frames:
+                t_value = self.times[t_idx]
+                target = self.get_frame(t_idx, t_idx).to(self.model.n_raw.dtype)
+                rendered = self.render_one(t_idx, t_value)
+                total_l1 += l1_loss(rendered, target).item()
+                total_mse += mse_loss(rendered, target).item()
+        n = max(len(frames), 1)
         avg_mse = total_mse / n
         avg_psnr = 10.0 * float(torch.log10(torch.tensor(max(avg_mse, 1e-12)).reciprocal()))
         return {"val_l1": total_l1 / n, "val_psnr": avg_psnr}
@@ -591,7 +561,6 @@ class Trainer:
         samples a single frame: cam_idx == t_idx == frame_idx.
         """
         cfg = config or TrainerConfig()
-        cfg.monocular = True
         if cfg.validation_frames is None:
             if dataset.val_indices:
                 cfg.validation_frames = list(dataset.val_indices)
