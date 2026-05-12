@@ -47,10 +47,22 @@ per-point observability).
 
 ## Training
 
-Training runs on Modal (L4 GPU). One-time data upload (from repo root):
+Training runs on [Modal](https://modal.com/) (L4 GPU). One-time setup:
+
+```bash
+pip install modal           # already in requirements.txt
+modal token new             # opens a browser to mint API tokens; writes ~/.modal.toml
+```
+
+Modal credits are billed against the account that owns the token. The
+training image is defined inside `scripts/train_modal.py`; the first
+`modal run` will build it (a few minutes), subsequent runs reuse the
+cached image. Two named volumes hold persistent state — create them
+once and upload one scene:
 
 ```bash
 modal volume create gs-mono
+modal volume create gs-checkpoints
 modal volume put gs-mono ./data/nerfies/slice-banana /slice-banana
 ```
 
