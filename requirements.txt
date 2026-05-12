@@ -1,4 +1,24 @@
-torch>=2.0
-numpy>=1.24
+# Core dependencies for monocular training + evaluation.
+# Pin to versions that match the development environment; loosen for
+# downstream consumers if needed.
+torch>=2.1,<3.0
+numpy>=1.24,<2.0
+Pillow>=10.0
 matplotlib>=3.7
+
+# Tests.
 pytest>=7.0
+
+# Optional: perceptual loss term --lambda_lpips. Pulls in torchvision.
+# Comment out if you don't need it.
+lpips>=0.1.4
+torchvision>=0.16
+
+# GPU production rasterizer (Inria 3DGS). Required for live Modal
+# training; not pip-installable on CPU-only hosts since it builds a
+# CUDA extension. Install via:
+#   pip install git+https://github.com/graphdeco-inria/diff-gaussian-rasterization.git
+# diff-gaussian-rasterization
+
+# Optional: Modal entrypoints (scripts/train_modal.py + eval_per_frame).
+modal>=0.66
