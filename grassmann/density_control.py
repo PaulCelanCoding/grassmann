@@ -133,10 +133,14 @@ class DensityTracker:
         self.grad_counts += 1
 
     def mean_grad(self) -> Tensor:
+        """Per-Gaussian average screen-space ‖∇μ_2d‖ since the last reset()."""
         counts = self.grad_counts.clamp_min(1)
         return self.grad_accum / counts.to(self.grad_accum.dtype)
 
     def reset(self) -> None:
+        """Clear the accumulated screen-space gradient stats. Call after each
+        densify_and_prune() so the next window observes a fresh trigger signal.
+        """
         self.grad_accum.zero_()
         self.grad_counts.zero_()
 

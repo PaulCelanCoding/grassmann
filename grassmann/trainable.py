@@ -116,6 +116,7 @@ class TrainableGaussians(nn.Module):
 
     @property
     def N(self) -> int:
+        """Number of Gaussians currently in the model."""
         return self.n_raw.shape[0]
 
     def forward(self) -> GaussianParams:
