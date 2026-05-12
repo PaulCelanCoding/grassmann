@@ -67,12 +67,6 @@ from .rasterizer import project_to_screen, rasterize
 from .trainable import TrainableGaussians, build_optimizer
 from .density_control import DensityTracker, DensityConfig
 from .fast_rasterizer import fast_rasterize, FastRasterConfig, is_available as fast_available
-from .surfel_rasterizer import (
-    surfel_rasterize, SurfelRasterConfig, is_available as surfel_available,
-)
-from .losses import (
-    depth_distortion_loss, normal_consistency_loss, depth_to_world_normal,
-)
 
 
 @dataclass
@@ -191,20 +185,6 @@ class TrainerConfig:
     # 'ssim' (1 - SSIM Gaussian-windowed, matches 3DGS DSSIM term). Only
     # active when lambda_structural > 0.
     structural_kind: str = "boxstats"
-    # Rasterizer choice: 'gaussian' (Inria diff_gaussian_rasterization, with
-    # σ_lift² rank-2→rank-3 lift) or 'surfel' (Huang2024 diff_surfel_rasterization,
-    # native rank-2 disk via ray-plane intersection). See results/rca/surfel_*
-    # for the A/B test.
-    rasterizer: str = "gaussian"
-    surfel_raster_config: Optional[SurfelRasterConfig] = None
-    # 2DGS regularizers — only meaningful when rasterizer == 'surfel'. Lambdas
-    # match 2DGS paper defaults; schedule activates after the listed iter.
-    use_2dgs_losses: bool = False
-    lambda_normal: float = 0.05
-    lambda_dist: float = 100.0
-    normal_after: int = 7000
-    dist_after: int = 3000
-    depth_ratio: float = 0.0  # 0 = expected depth (mip-NeRF-like), 1 = median (DTU)
     # Profiling: when True, train_step + train() bracket each phase with
     # CUDA-synced perf_counter() and dump per-phase ms/iter at log_every.
     # First profile_warmup_iters iters are discarded (JIT, allocator warmup).
@@ -379,39 +359,19 @@ class Trainer:
 
     def render_one(self, cam_idx: int, t_value: float,
                    means2d_capture: Optional[list] = None,
-                   return_aux: bool = False,
-                   bg_override: Optional[Tensor] = None):
+                   bg_override: Optional[Tensor] = None) -> Tensor:
         """Render the current model from camera cam_idx at time t_value.
 
         When `means2d_capture` is a list, the means2D dummy tensor (which gets
         screen-space gradients from the CUDA kernel after backward) is appended
         to it. Used by DensityTracker for the screen-space ‖∇μ_2d‖ trigger.
 
-        When `return_aux=True` and the surfel rasterizer is active, returns
-        (image, aux_dict) — aux contains 'rend_normal', 'rend_dist', etc. (see
-        grassmann.surfel_rasterizer.RENDER_PKG_KEYS). Otherwise returns image.
-
         bg_override: optional (3,) tensor that replaces self.config.background
-        for this call only — used by #7.2 random_background during train_step.
+        for this call only — used by random_background during train_step.
         """
         params = self.model.forward()
         bg_src = bg_override if bg_override is not None else self.config.background
         bg = bg_src.to(dtype=params.color.dtype, device=params.color.device)
-
-        if self.config.rasterizer == "surfel":
-            if not (surfel_available() and params.n.is_cuda):
-                raise RuntimeError(
-                    "rasterizer='surfel' requires diff_surfel_rasterization + CUDA"
-                )
-            sc = self.config.surfel_raster_config or SurfelRasterConfig()
-            out = surfel_rasterize(
-                params, t_value, self._perturbed_camera(cam_idx), self.H, self.W,
-                background=bg, config=sc,
-                static_baseline=self.config.static_baseline,
-                means2d_capture=means2d_capture,
-                return_aux=return_aux,
-            )
-            return out
 
         if self.config.use_fast_rasterizer and fast_available() and params.n.is_cuda:
             fc = self.config.fast_raster_config or FastRasterConfig()
@@ -420,29 +380,23 @@ class Trainer:
             warmup_step = self.config.sh_degree_warmup_step
             if warmup_step > 0:
                 sh_override = min(fc.sh_degree, self.current_iter // warmup_step)
-            img = fast_rasterize(
+            return fast_rasterize(
                 params, t_value, self._perturbed_camera(cam_idx), self.H, self.W,
                 background=bg, config=fc,
                 static_baseline=self.config.static_baseline,
                 means2d_capture=means2d_capture,
                 sh_degree_override=sh_override,
             )
-            return (img, None) if return_aux else img
         # Fallback: toy rasterizer path (also used when no GPU or no extension).
         if means2d_capture is not None:
             means2d_capture.append(None)
         derived = compute_derived(params)
         tc = condition_on_time(params, derived, t_value, static=self.config.static_baseline)
         sg = project_to_screen(params, tc, self._perturbed_camera(cam_idx))
-        img = rasterize(sg, H=self.H, W=self.W, background=bg)
-        return (img, None) if return_aux else img
+        return rasterize(sg, H=self.H, W=self.W, background=bg)
 
     def train_step(self, iter_num: int = 0) -> tuple[float, float, float]:
-        """One stochastic training step. Returns (total loss, L1, PSNR_dB).
-
-        iter_num is the (1-based) current iteration; used to gate the 2DGS
-        depth-distortion / normal-consistency lambdas per the paper schedule.
-        """
+        """One stochastic training step. Returns (total loss, L1, PSNR_dB)."""
         self.current_iter = iter_num
         # Sample a frame.
         with self._phase("data"):
@@ -462,40 +416,23 @@ class Trainer:
             means2d_capture: Optional[list] = [] if self.density_tracker is not None else None
             target = self.get_frame(cam_idx, t_idx).to(self.model.n_raw.dtype)
 
-        # Surfel + 2DGS losses: pull aux maps from the rasterizer for
-        # depth-distortion / normal-consistency regularization.
-        want_aux = (self.config.rasterizer == "surfel"
-                    and self.config.use_2dgs_losses)
         with self._phase("forward_render"):
             # #7.2 random background during training only.
             bg_override = None
             if self.config.random_background:
                 bg_override = torch.rand(3, dtype=self.model.n_raw.dtype,
                                          device=self.model.n_raw.device)
-            if want_aux:
-                rendered, aux = self.render_one(cam_idx, t_value,
-                                                means2d_capture=means2d_capture,
-                                                return_aux=True,
-                                                bg_override=bg_override)
-            else:
-                rendered = self.render_one(cam_idx, t_value,
-                                           means2d_capture=means2d_capture,
-                                           bg_override=bg_override)
-                aux = None
+            rendered = self.render_one(cam_idx, t_value,
+                                       means2d_capture=means2d_capture,
+                                       bg_override=bg_override)
 
         with self._phase("loss"):
             # #1.1 per-frame exposure: rendered ← exp(g_t)·rendered + b_t.
-            # rendered may be (H, W, 3) (toy/fast paths) or (3, H, W) (surfel path).
-            # Bias is per-channel (3,); broadcast against last or first axis.
+            # rendered is (H, W, 3) with bias broadcast on the channel dim.
             if self.exposure_log_gain is not None:
                 g = torch.exp(self.exposure_log_gain[t_idx])                   # scalar
                 b = self.exposure_bias[t_idx]                                  # (3,)
-                if rendered.dim() == 3 and rendered.shape[-1] == 3:
-                    # (H, W, 3): bias broadcasts naturally on last dim.
-                    rendered = (g * rendered + b).clamp(0.0, 1.0)
-                else:
-                    # (3, H, W) layout (e.g. surfel aux path).
-                    rendered = (g * rendered + b.view(3, 1, 1)).clamp(0.0, 1.0)
+                rendered = (g * rendered + b).clamp(0.0, 1.0)
 
             # Loss.
             loss = photometric_loss(
@@ -527,30 +464,6 @@ class Trainer:
                 n_dot_mu = (n_unit * mu_full).sum(-1)
                 loss = loss + self.config.lambda_mu_penalty * (n_dot_mu ** 2).mean()
         with self._phase("loss_extra"):
-            if aux is not None:
-                # 2DGS regularizers (gated by iter — paper defaults: dist@3000, normal@7000).
-                l_dist = self.config.lambda_dist if iter_num > self.config.dist_after else 0.0
-                l_norm = self.config.lambda_normal if iter_num > self.config.normal_after else 0.0
-                if l_dist > 0.0:
-                    loss = loss + l_dist * depth_distortion_loss(aux["rend_dist"])
-                if l_norm > 0.0:
-                    rend_alpha = aux["rend_alpha"]                  # (1, H, W)
-                    # surf_depth = expected*(1-r) + median*r
-                    exp_d = aux["expected_depth"] / rend_alpha.detach().clamp_min(1e-6)
-                    exp_d = torch.nan_to_num(exp_d, nan=0.0, posinf=0.0, neginf=0.0)
-                    med_d = torch.nan_to_num(aux["median_depth"], nan=0.0,
-                                             posinf=0.0, neginf=0.0)
-                    surf_d = exp_d * (1 - self.config.depth_ratio) + \
-                             self.config.depth_ratio * med_d         # (1, H, W)
-                    # rend_normal in allmap is view-space; rotate to world via R^T.
-                    cam = self._perturbed_camera(cam_idx)
-                    R_w = cam.R.to(device=aux["rend_normal"].device,
-                                   dtype=aux["rend_normal"].dtype)
-                    rend_n_view = aux["rend_normal"].permute(1, 2, 0)  # (H, W, 3)
-                    rend_n_world = (rend_n_view @ R_w).permute(2, 0, 1) # (3, H, W)
-                    surf_n_world = depth_to_world_normal(surf_d, cam).permute(2, 0, 1)
-                    surf_n_world = surf_n_world * rend_alpha.detach()
-                    loss = loss + l_norm * normal_consistency_loss(rend_n_world, surf_n_world)
             # Aniso / time-coherence both need a fresh forward+derived; share one.
             _need_derived = (self.config.lambda_aniso > 0.0
                              or self.config.lambda_time_coherence > 0.0)

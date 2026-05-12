@@ -49,10 +49,6 @@ image = (
         "git+https://github.com/graphdeco-inria/diff-gaussian-rasterization.git",
         gpu="L4",
     )
-    .pip_install(
-        "git+https://github.com/hbb1/diff-surfel-rasterization.git",
-        gpu="L4",
-    )
     .add_local_python_source("grassmann")
     .add_local_dir(str(REPO / "scripts"), remote_path="/root/scripts")
 )
@@ -163,13 +159,6 @@ def train(
     mu_lr_split: bool,
     lr_mu_spatial: float,
     lr_mu_time: float,
-    rasterizer: str,
-    use_2dgs_losses: bool,
-    lambda_normal: float,
-    lambda_dist: float,
-    surfel_eigval_floor: float,
-    surfel_sigma_3d_blur: float,
-    surfel_eigh_jitter: float,
     init_points_path: str,
     init_colors_path: str,
     # --- Wave A probe flags (quality_knobs_evaluation.md) ---
@@ -298,18 +287,6 @@ def train(
         argv += ["--mu_lr_split",
                  "--lr_mu_spatial", str(lr_mu_spatial),
                  "--lr_mu_time", str(lr_mu_time)]
-    if rasterizer != "gaussian":
-        argv += ["--rasterizer", rasterizer]
-    if use_2dgs_losses:
-        argv += ["--use_2dgs_losses",
-                 "--lambda_normal", str(lambda_normal),
-                 "--lambda_dist", str(lambda_dist)]
-    if surfel_eigval_floor != 1e-6:
-        argv += ["--surfel_eigval_floor", str(surfel_eigval_floor)]
-    if surfel_sigma_3d_blur > 0.0:
-        argv += ["--surfel_sigma_3d_blur", str(surfel_sigma_3d_blur)]
-    if surfel_eigh_jitter > 0.0:
-        argv += ["--surfel_eigh_jitter", str(surfel_eigh_jitter)]
     if init_points_path:
         argv += ["--init_points_path", init_points_path]
     if init_colors_path:
@@ -401,7 +378,6 @@ def render(
     allow_distortion: bool,
     side_by_side: bool,
     sigma_3d_blur: float,
-    rasterizer: str = "gaussian",
 ) -> None:
     import os
     scene_dir = _ensure_scene_unpacked(scene)
@@ -420,8 +396,6 @@ def render(
         "--device", "cuda",
         "--sigma_3d_blur", str(sigma_3d_blur),
     ]
-    if rasterizer != "gaussian":
-        argv += ["--rasterizer", rasterizer]
     if split is not None:
         argv += ["--split", split]
     if allow_distortion:
@@ -523,13 +497,6 @@ def main(
     mu_lr_split: bool = False,
     lr_mu_spatial: float = 1e-4,
     lr_mu_time: float = 1e-3,
-    rasterizer: str = "gaussian",
-    use_2dgs_losses: bool = False,
-    lambda_normal: float = 0.05,
-    lambda_dist: float = 100.0,
-    surfel_eigval_floor: float = 1e-6,
-    surfel_sigma_3d_blur: float = 0.0,
-    surfel_eigh_jitter: float = 0.0,
     init_points_path: str = "",
     init_colors_path: str = "",
     # --- Wave A probe flags (quality_knobs_evaluation.md) ---
@@ -631,13 +598,6 @@ def main(
             mu_lr_split=mu_lr_split,
             lr_mu_spatial=lr_mu_spatial,
             lr_mu_time=lr_mu_time,
-            rasterizer=rasterizer,
-            use_2dgs_losses=use_2dgs_losses,
-            lambda_normal=lambda_normal,
-            lambda_dist=lambda_dist,
-            surfel_eigval_floor=surfel_eigval_floor,
-            surfel_sigma_3d_blur=surfel_sigma_3d_blur,
-            surfel_eigh_jitter=surfel_eigh_jitter,
             init_points_path=init_points_path,
             init_colors_path=init_colors_path,
             color_lr_warmup_iter=color_lr_warmup_iter,
@@ -731,13 +691,6 @@ def main(
             mu_lr_split=mu_lr_split,
             lr_mu_spatial=lr_mu_spatial,
             lr_mu_time=lr_mu_time,
-            rasterizer=rasterizer,
-            use_2dgs_losses=use_2dgs_losses,
-            lambda_normal=lambda_normal,
-            lambda_dist=lambda_dist,
-            surfel_eigval_floor=surfel_eigval_floor,
-            surfel_sigma_3d_blur=surfel_sigma_3d_blur,
-            surfel_eigh_jitter=surfel_eigh_jitter,
             init_points_path=init_points_path,
             init_colors_path=init_colors_path,
             color_lr_warmup_iter=color_lr_warmup_iter,
@@ -795,7 +748,6 @@ def main(
             split=split_arg, allow_distortion=allow_distortion,
             side_by_side=side_by_side,
             sigma_3d_blur=sigma_3d_blur,
-            rasterizer=rasterizer,
         )
     elif cmd == "eval_per_frame":
         if not ckpt:

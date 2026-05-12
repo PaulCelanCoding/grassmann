@@ -35,7 +35,6 @@ from grassmann.datasets.dycheck import load_dycheck
 from grassmann.datasets.nerfies import load_nerfies
 from grassmann.density_control import DensityConfig
 from grassmann.fast_rasterizer import FastRasterConfig
-from grassmann.surfel_rasterizer import SurfelRasterConfig
 from grassmann.initialization import init_gaussians_from_points
 from grassmann.trainable import trainable_from_params
 from grassmann.training import Trainer, TrainerConfig
@@ -230,31 +229,6 @@ def main():
     ap.add_argument("--lambda_mu_penalty", type=float, default=1.0,
                     help="Strength of the soft <n,μ>² penalty when "
                          "--mu_constraint=penalty. 1.0 default; ignored otherwise.")
-    # 2DGS A/B (results/rca/surfel_rasterizer_ab.md): swap diff-gaussian for
-    # diff-surfel, optionally enable depth-distortion + normal-consistency.
-    ap.add_argument("--rasterizer", choices=("gaussian", "surfel"), default="gaussian",
-                    help="'gaussian' = Inria diff_gaussian_rasterization (current default, "
-                         "needs σ_lift² rank-2→rank-3 lift). 'surfel' = Huang2024 "
-                         "diff_surfel_rasterization (native rank-2 disk, no lift).")
-    ap.add_argument("--use_2dgs_losses", action="store_true",
-                    help="Enable 2DGS depth-distortion + normal-consistency regularizers. "
-                         "Only meaningful with --rasterizer surfel. Schedule: dist@3000, normal@7000.")
-    ap.add_argument("--lambda_normal", type=float, default=0.05,
-                    help="2DGS normal-consistency lambda (paper default 0.05).")
-    ap.add_argument("--lambda_dist", type=float, default=100.0,
-                    help="2DGS depth-distortion lambda (paper: 100 indoor/object, 1000 unbounded).")
-    ap.add_argument("--surfel_eigval_floor", type=float, default=1e-6,
-                    help="Floor on smallest eigenvalue of Σ_3D(t₀) before sqrt; "
-                         "stabilizes eigh backward at exact rank-2 degeneracy.")
-    ap.add_argument("--surfel_sigma_3d_blur", type=float, default=0.0,
-                    help="Optional pre-eigh σ_lift² lift in the surfel path; "
-                         "tests whether σ_lift² acts as a hidden training regularizer "
-                         "in the gaussian path. 0=honest rank-2 (default); 1e-4 matches A1.")
-    ap.add_argument("--surfel_eigh_jitter", type=float, default=0.0,
-                    help="Anisotropic random jitter on Σ_3D before eigh. Breaks "
-                         "1/Δλ degeneracy in eigh backward at near-degenerate "
-                         "in-plane eigvals (~14%% of Gaussians by p99 anisotropy). "
-                         "1e-5 to 1e-3 are reasonable.")
     ap.add_argument("--init_points_path", type=Path, default=None,
                     help="Override the dataset's bundled point cloud with an external "
                          "(N, 3) .npy file (e.g. from MASt3R / DUSt3R / VGGT). "
@@ -642,16 +616,6 @@ def main():
             sh_degree=args.sh_degree,
             mip_filter_sigma_pixel=args.mip_filter_sigma_pixel,
         ),
-        rasterizer=args.rasterizer,
-        surfel_raster_config=SurfelRasterConfig(
-            sh_degree=args.sh_degree,
-            eigval_floor=args.surfel_eigval_floor,
-            sigma_3d_blur=args.surfel_sigma_3d_blur,
-            eigh_jitter=args.surfel_eigh_jitter,
-        ),
-        use_2dgs_losses=args.use_2dgs_losses,
-        lambda_normal=args.lambda_normal,
-        lambda_dist=args.lambda_dist,
         validation_every=max(args.log_every, args.num_iters // 10),
         static_baseline=args.static_baseline,
         lambda_frob=args.lambda_frob,
